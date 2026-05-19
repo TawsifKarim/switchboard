@@ -12,9 +12,12 @@
   "app": {
     "windows": [
       {
-        "title": "switchboard",
-        "width": 800,
-        "height": 600
+        "title": "Switchboard",
+        "width": 1200,
+        "height": 760,
+        "minWidth": 720,
+        "minHeight": 500,
+        "resizable": true
       }
     ],
     "security": {

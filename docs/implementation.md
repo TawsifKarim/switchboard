@@ -190,11 +190,11 @@ Read `docs/PLAN.md` first for context, decisions, and house rules.
 
 ## Phase 10 — Polish + release build
 
-- [ ] 10.1 Tune window default size and `minWidth`/`minHeight` in `tauri.conf.json`.
-- [ ] 10.2 Empty-state copy when no apps configured.
-- [ ] 10.3 Confirm-delete dialog on trash button (use shadcn `AlertDialog`).
-- [ ] 10.4 Verify dev/prod config paths both work (test prod path by running `pnpm tauri build` and launching the `.app`).
-- [ ] 10.5 Tag `v0.1.0` and write a short `README.md` for the repo (install + run).
+- [x] 10.1 Tune window default size and `minWidth`/`minHeight` in `tauri.conf.json`. *(1200x760 default, 720x500 min, title "Switchboard".)*
+- [x] 10.2 Empty-state copy when no apps configured. *(Already added in Phase 5: "No apps yet — click + Add".)*
+- [x] 10.3 Confirm-delete dialog on trash button (use shadcn `AlertDialog`). *(Already added in Phase 5: `AlertDialog` with title `Delete "<name>"?`, destructive `Delete` action, `Cancel`.)*
+- [x] 10.4 Verify dev/prod config paths both work (test prod path by running `pnpm tauri build` and launching the `.app`).
+- [x] 10.5 Tag `v0.1.0` and write a short `README.md` for the repo (install + run).
 
 **Success criteria**
 - `pnpm tauri build` produces a `.app` bundle under `src-tauri/target/release/bundle/macos/`.

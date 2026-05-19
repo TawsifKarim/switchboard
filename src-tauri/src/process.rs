@@ -82,10 +82,6 @@ impl ProcessManager {
         }
     }
 
-    pub fn log_dir(&self) -> &PathBuf {
-        &self.log_dir
-    }
-
     /// Number of currently-running apps. Used by the tray to update the
     /// "Running: N" label.
     pub fn running_count(&self) -> usize {
