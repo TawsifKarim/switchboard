@@ -72,13 +72,13 @@ Read `docs/PLAN.md` first for context, decisions, and house rules.
 
 ## Phase 3 — Config layer (`apps.json`)
 
-- [ ] 3.1 Define `AppEntry { id, name, directory, command, tag }` in `config.rs` with serde derives.
-- [ ] 3.2 Implement `config_path(app: &AppHandle) -> PathBuf`:
+- [x] 3.1 Define `AppEntry { id, name, directory, command, tag }` in `config.rs` with serde derives.
+- [x] 3.2 Implement `config_path(app: &AppHandle) -> PathBuf`:
   - Dev (when `cfg!(debug_assertions)`): `<project-root>/apps.json`.
   - Prod: `~/.config/switchboard/apps.json` via `app.path().config_dir()`.
-- [ ] 3.3 Implement `load() -> Vec<AppEntry>` (returns empty if file missing) and `save(&[AppEntry])` (atomic write: temp file + rename).
-- [ ] 3.4 Implement `add(entry)`, `delete(id)`, helpers as needed.
-- [ ] 3.5 Unit test round-trip in `#[cfg(test)]` block.
+- [x] 3.3 Implement `load() -> Vec<AppEntry>` (returns empty if file missing) and `save(&[AppEntry])` (atomic write: temp file + rename).
+- [x] 3.4 Implement `add(entry)`, `delete(id)`, helpers as needed.
+- [x] 3.5 Unit test round-trip in `#[cfg(test)]` block.
 
 **Success criteria**
 - `cargo test -p switchboard config::` (or equivalent) passes; the test writes, reads back, and asserts equality of a fixture.
