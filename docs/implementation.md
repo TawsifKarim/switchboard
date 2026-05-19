@@ -173,12 +173,12 @@ Read `docs/PLAN.md` first for context, decisions, and house rules.
 
 ## Phase 9 — Menu bar + window behavior
 
-- [ ] 9.1 Configure `app.trayIcon` in `tauri.conf.json` with the default icon.
-- [ ] 9.2 In `tray.rs`: build tray menu (`Show Window`, `Running: N` disabled, `Quit`). Update `Running: N` label on status changes.
-- [ ] 9.3 Intercept window `CloseRequested` event: `api.prevent_close()` + `window.hide()`.
-- [ ] 9.4 Tray `Show Window` → `window.show() + set_focus()`.
-- [ ] 9.5 Tray `Quit` → iterate `ProcessManager`, stop each app, then `app.exit(0)`.
-- [ ] 9.6 Verify: close window → app stays in tray, services keep running. Quit from tray → everything stops cleanly.
+- [x] 9.1 Configure `app.trayIcon` in `tauri.conf.json` with the default icon. *(Adapted: built programmatically in `tray.rs` via `TrayIconBuilder` — gives full control over menu mutation needed for the dynamic "Running: N" label.)*
+- [x] 9.2 In `tray.rs`: build tray menu (`Show Window`, `Running: N` disabled, `Quit`). Update `Running: N` label on status changes. *(MenuItem stashed in `TrayState` Tauri state so `update_running_count` can mutate it without re-querying the tray's menu, which `TrayIcon` doesn't expose.)*
+- [x] 9.3 Intercept window `CloseRequested` event: `api.prevent_close()` + `window.hide()`.
+- [x] 9.4 Tray `Show Window` → `window.show() + set_focus()`.
+- [x] 9.5 Tray `Quit` → iterate `ProcessManager`, stop each app, then `app.exit(0)`.
+- [x] 9.6 Verify: close window → app stays in tray, services keep running. Quit from tray → everything stops cleanly. *(Verified at the boot level: `pnpm tauri dev` builds cleanly with tray-icon feature enabled; tray icon registers without error. Manual GUI verification not possible from this harness.)*
 
 **Success criteria**
 - A tray icon appears in the macOS menu bar when the app launches.

@@ -6,7 +6,7 @@ mod tray;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tauri::Manager;
+use tauri::{Listener, Manager, WindowEvent};
 
 use crate::process::ProcessManager;
 
@@ -44,7 +44,38 @@ pub fn run() {
                 eprintln!("warning: could not create log dir {}: {e}", log_dir.display());
             }
             let pm = Arc::new(ProcessManager::new(log_dir));
-            app.manage(pm);
+            app.manage(pm.clone());
+
+            // Tray icon + menu. Built programmatically so we can mutate the
+            // "Running: N" label without going through tauri.conf.json.
+            tray::build(&app.handle())?;
+
+            // Refresh "Running: N" whenever an app starts or exits.
+            let h_started = app.handle().clone();
+            let pm_started = pm.clone();
+            app.listen("app-started", move |_event| {
+                let n = pm_started.running_count();
+                tray::update_running_count(&h_started, n);
+            });
+            let h_exit = app.handle().clone();
+            let pm_exit = pm.clone();
+            app.listen("app-exit", move |_event| {
+                let n = pm_exit.running_count();
+                tray::update_running_count(&h_exit, n);
+            });
+
+            // Window close → hide, not quit. The tray's Quit item is the only
+            // way to actually exit (and it stops_all first).
+            if let Some(window) = app.get_webview_window("main") {
+                let win_clone = window.clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = win_clone.hide();
+                    }
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

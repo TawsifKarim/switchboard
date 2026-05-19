@@ -7,9 +7,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use base64::Engine;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
+use tauri::Emitter;
 use tokio::sync::{broadcast, Notify};
+use tokio::task::AbortHandle;
 
 #[cfg(unix)]
 use nix::sys::signal::{kill, killpg, Signal};
@@ -34,6 +37,13 @@ pub struct ExitPayload {
     pub code: i32,
 }
 
+/// Payload for the global `app-started` event.
+#[derive(Clone, Debug, Serialize)]
+pub struct StartedPayload {
+    pub id: String,
+    pub pid: u32,
+}
+
 pub struct RunningApp {
     pub pid: u32,
     pub broadcast_tx: broadcast::Sender<Vec<u8>>,
@@ -49,6 +59,9 @@ struct Inner {
     /// Prevents a concurrent second start from passing the dup-check and
     /// leaking a child by overwriting the first RunningApp.
     starting: std::collections::HashSet<String>,
+    /// Background tasks forwarding PTY bytes to Tauri events. Keyed by app id.
+    /// Lets attach/detach be idempotent: detach aborts the existing task.
+    attachments: HashMap<String, AbortHandle>,
 }
 
 pub struct ProcessManager {
@@ -63,6 +76,7 @@ impl ProcessManager {
                 running: HashMap::new(),
                 last_exit: HashMap::new(),
                 starting: std::collections::HashSet::new(),
+                attachments: HashMap::new(),
             })),
             log_dir,
         }
@@ -72,24 +86,43 @@ impl ProcessManager {
         &self.log_dir
     }
 
+    /// Number of currently-running apps. Used by the tray to update the
+    /// "Running: N" label.
+    pub fn running_count(&self) -> usize {
+        self.inner.lock().unwrap().running.len()
+    }
+
     /// Production entry point: emit a Tauri event on exit.
     pub async fn start(&self, app: tauri::AppHandle, entry: AppEntry) -> Result<u32> {
         let app_for_cb = app.clone();
-        self.start_with_callback(
-            entry,
-            Box::new(move |id, code| {
-                use tauri::Emitter;
-                // Single global event; frontend routes by id.
-                let _ = app_for_cb.emit(
-                    "app-exit",
-                    ExitPayload {
-                        id: id.to_string(),
-                        code,
-                    },
-                );
-            }),
-        )
-        .await
+        let id_for_event = entry.id.clone();
+        let pid = self
+            .start_with_callback(
+                entry,
+                Box::new(move |id, code| {
+                    use tauri::Emitter;
+                    // Single global event; frontend routes by id.
+                    let _ = app_for_cb.emit(
+                        "app-exit",
+                        ExitPayload {
+                            id: id.to_string(),
+                            code,
+                        },
+                    );
+                }),
+            )
+            .await?;
+        // Also emit a global app-started event so listeners (e.g. the tray
+        // "Running: N" label) can refresh without polling.
+        use tauri::Emitter;
+        let _ = app.emit(
+            "app-started",
+            StartedPayload {
+                id: id_for_event,
+                pid,
+            },
+        );
+        Ok(pid)
     }
 
     /// Test/internal entry point: callback receives (id, exit_code) on child exit.
@@ -212,6 +245,12 @@ impl ProcessManager {
                 let mut inner = inner_for_waiter.lock().unwrap();
                 inner.running.remove(&id_for_waiter);
                 inner.last_exit.insert(id_for_waiter.clone(), code);
+                // The forward task ends on its own (broadcast sender dropped
+                // with RunningApp), but the AbortHandle entry would leak
+                // across start/stop cycles. Clear it here.
+                if let Some(h) = inner.attachments.remove(&id_for_waiter) {
+                    h.abort();
+                }
             }
             notify_for_waiter.notify_one();
         });
@@ -308,6 +347,48 @@ impl ProcessManager {
         inner.running.get(id).map(|a| a.broadcast_tx.subscribe())
     }
 
+    /// Begin forwarding the app's PTY output to a Tauri event named
+    /// `pty:<id>:data`, with payload = base64-encoded bytes (so arbitrary
+    /// ANSI/binary bytes survive the JSON boundary).
+    ///
+    /// Idempotent: a second attach for the same id aborts the previous task
+    /// before installing a new one.
+    pub async fn attach(&self, id: &str, app: tauri::AppHandle) -> Result<()> {
+        let rx = self
+            .subscribe(id)
+            .await
+            .ok_or_else(|| anyhow!("app {id} not running"))?;
+
+        // Abort any prior attachment for this id before installing a new one.
+        if let Some(prev) = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.attachments.remove(id)
+        } {
+            prev.abort();
+        }
+
+        let event_name = format!("pty:{id}:data");
+        let task = tokio::spawn(forward_loop(rx, app, event_name));
+        let abort = task.abort_handle();
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.attachments.insert(id.to_string(), abort);
+        }
+        Ok(())
+    }
+
+    /// Stop forwarding PTY bytes for this id. No-op if not attached.
+    pub async fn detach(&self, id: &str) -> Result<()> {
+        let prev = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.attachments.remove(id)
+        };
+        if let Some(h) = prev {
+            h.abort();
+        }
+        Ok(())
+    }
+
     pub async fn write_pty(&self, id: &str, bytes: &[u8]) -> Result<()> {
         let writer_arc = {
             let inner = self.inner.lock().unwrap();
@@ -381,6 +462,28 @@ fn descendants(root: u32) -> Vec<u32> {
         }
     }
     all
+}
+
+async fn forward_loop(
+    mut rx: broadcast::Receiver<Vec<u8>>,
+    app: tauri::AppHandle,
+    event_name: String,
+) {
+    let engine = base64::engine::general_purpose::STANDARD;
+    loop {
+        match rx.recv().await {
+            Ok(bytes) => {
+                let payload = engine.encode(&bytes);
+                let _ = app.emit(&event_name, payload);
+            }
+            // Sender dropped (process exited): exit cleanly so the abort
+            // handle's drop is harmless.
+            Err(broadcast::error::RecvError::Closed) => break,
+            // Slow receiver — drop the missed messages and keep going.
+            // The log file is the durable record of full output.
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+        }
+    }
 }
 
 fn reader_loop(
@@ -662,6 +765,45 @@ mod tests {
             "exactly one start should succeed, got {oks}: {r1:?} / {r2:?}"
         );
         pm.stop("race").await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn detach_unknown_id_is_ok() {
+        let dir = tempdir().unwrap();
+        let pm = ProcessManager::new(dir.path().to_path_buf());
+        pm.detach("ghost").await.unwrap();
+        let inner = pm.inner.lock().unwrap();
+        assert!(inner.attachments.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn waiter_clears_attachment_entry_on_exit() {
+        // When a process exits, the waiter task must drop any attachment
+        // entry so the map doesn't grow unbounded across start/stop cycles.
+        let dir = tempdir().unwrap();
+        let pm = ProcessManager::new(dir.path().to_path_buf());
+        let (cb, mut rx) = exit_recorder();
+        // Plant a fake attachment entry. attach() needs an AppHandle so we
+        // can't call it here — just simulate the bookkeeping the same way
+        // attach() would.
+        {
+            let mut inner = pm.inner.lock().unwrap();
+            let h = tokio::spawn(async {
+                tokio::time::sleep(Duration::from_secs(30)).await
+            })
+            .abort_handle();
+            inner.attachments.insert("decay".to_string(), h);
+        }
+        pm.start_with_callback(test_entry("decay", "true"), cb)
+            .await
+            .unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let inner = pm.inner.lock().unwrap();
+        assert!(
+            !inner.attachments.contains_key("decay"),
+            "waiter should have cleared the attachment entry"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
