@@ -93,6 +93,44 @@ pub async fn get_status(
     Ok(pm.status(&id).await)
 }
 
+#[tauri::command]
+pub async fn attach_pty(
+    app: AppHandle,
+    pm: tauri::State<'_, Arc<ProcessManager>>,
+    id: String,
+) -> Result<(), String> {
+    pm.attach(&id, app.clone()).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn detach_pty(
+    pm: tauri::State<'_, Arc<ProcessManager>>,
+    id: String,
+) -> Result<(), String> {
+    pm.detach(&id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn write_pty(
+    pm: tauri::State<'_, Arc<ProcessManager>>,
+    id: String,
+    data: String,
+) -> Result<(), String> {
+    pm.write_pty(&id, data.as_bytes())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn resize_pty(
+    pm: tauri::State<'_, Arc<ProcessManager>>,
+    id: String,
+    rows: u16,
+    cols: u16,
+) -> Result<(), String> {
+    pm.resize(&id, rows, cols).await.map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3,11 +3,18 @@
   import { ScrollArea } from "$lib/components/ui/scroll-area";
   import AddAppDialog from "$lib/components/AddAppDialog.svelte";
   import AppRow from "$lib/components/AppRow.svelte";
+  import TerminalPanel from "$lib/components/TerminalPanel.svelte";
   import { apps } from "$lib/stores/apps.svelte";
 
   onMount(() => {
     apps.init().catch((e) => console.error("apps.init failed", e));
   });
+
+  const focusedName = $derived(
+    apps.focusedId == null
+      ? ""
+      : (apps.apps.find((a) => a.id === apps.focusedId)?.name ?? ""),
+  );
 </script>
 
 <div class="grid h-screen grid-rows-[auto_1fr]">
@@ -39,10 +46,18 @@
       </ScrollArea>
     </aside>
 
-    <main class="flex items-center justify-center p-6">
-      <p class="text-sm text-muted-foreground">
-        Select an app to view output
-      </p>
+    <main class="min-h-0 overflow-hidden">
+      {#if apps.focusedId == null}
+        <div class="flex h-full items-center justify-center p-6">
+          <p class="text-sm text-muted-foreground">
+            Select an app to view output
+          </p>
+        </div>
+      {:else}
+        {#key apps.focusedId}
+          <TerminalPanel id={apps.focusedId} name={focusedName} />
+        {/key}
+      {/if}
     </main>
   </div>
 </div>

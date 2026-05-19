@@ -27,9 +27,14 @@ class AppsStore {
   apps = $state<AppEntry[]>([]);
   runtime = $state<Record<string, RuntimeState>>({});
   loaded = $state(false);
+  focusedId = $state<string | null>(null);
 
   private unlisten: UnlistenFn | null = null;
   private initialized = false;
+
+  focus(id: string | null): void {
+    this.focusedId = id;
+  }
 
   async init(): Promise<void> {
     if (this.initialized) return;
@@ -58,6 +63,7 @@ class AppsStore {
   async remove(id: string): Promise<void> {
     await deleteApp(id);
     delete this.runtime[id];
+    if (this.focusedId === id) this.focusedId = null;
     await this.refresh();
   }
 

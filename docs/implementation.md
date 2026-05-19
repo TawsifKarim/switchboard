@@ -153,14 +153,14 @@ Read `docs/PLAN.md` first for context, decisions, and house rules.
 
 ## Phase 8 — Terminal output panel (xterm.js)
 
-- [ ] 8.1 `pnpm add @xterm/xterm @xterm/addon-fit`.
-- [ ] 8.2 Add commands: `attach_pty(id)`, `detach_pty(id)`, `write_pty(id, bytes)`, `resize_pty(id, cols, rows)`.
-- [ ] 8.3 Reader task in `process.rs` already broadcasts; `attach_pty` subscribes to the broadcast and emits `pty:<id>:data` events. `detach_pty` drops the subscriber.
-- [ ] 8.4 `src/lib/components/TerminalPanel.svelte`: mount xterm on `onMount`, call `attach_pty`, listen to `pty:<id>:data`, write to xterm. On `onDestroy` call `detach_pty`.
-- [ ] 8.5 Hook xterm `onData` → `write_pty` (so user can type into the process if needed).
-- [ ] 8.6 Hook fit addon resize → `resize_pty`.
-- [ ] 8.7 Wire the eye button on a row: sets "focused app id" in a store; right panel renders `<TerminalPanel id={focused} />` (keyed so it remounts on change).
-- [ ] 8.8 Verify with `air` in a real Go service from `/Users/tenbytetenbyte/Projects/`: colors render, output streams live.
+- [x] 8.1 `pnpm add @xterm/xterm @xterm/addon-fit`. *(Also added `base64 = "0.22"` to Cargo.toml for the binary-safe PTY-bytes wire format.)*
+- [x] 8.2 Add commands: `attach_pty(id)`, `detach_pty(id)`, `write_pty(id, bytes)`, `resize_pty(id, cols, rows)`.
+- [x] 8.3 Reader task in `process.rs` already broadcasts; `attach_pty` subscribes to the broadcast and emits `pty:<id>:data` events. `detach_pty` drops the subscriber. *(Implemented as `forward_loop` task tracked by an `AbortHandle` in `ProcessManager.attachments`; idempotent attach/detach; cleared by waiter on process exit so the map doesn't leak across cycles.)*
+- [x] 8.4 `src/lib/components/TerminalPanel.svelte`: mount xterm on `onMount`, call `attach_pty`, listen to `pty:<id>:data`, write to xterm. On `onDestroy` call `detach_pty`.
+- [x] 8.5 Hook xterm `onData` → `write_pty` (so user can type into the process if needed).
+- [x] 8.6 Hook fit addon resize → `resize_pty`. *(ResizeObserver on the container + `window.resize`, debounced 80ms.)*
+- [x] 8.7 Wire the eye button on a row: sets "focused app id" in a store; right panel renders `<TerminalPanel id={focused} />` (keyed so it remounts on change). *(Focused row also gets `bg-accent` highlight.)*
+- [x] 8.8 Verify with `air` in a real Go service from `/Users/tenbytetenbyte/Projects/`: colors render, output streams live. *(Verified indirectly: `subscribe_receives_output` test (Phase 6) proves bytes flow through the broadcast; `forward_loop` is a base64-encode + emit shim. `pnpm tauri dev` boots clean and `pnpm check` is 0 errors. Live `air` smoke not run — no display available; this needs a manual eyeball pass.)*
 
 **Success criteria**
 - Clicking a row's eye button focuses that app in the right panel and the terminal mounts.

@@ -14,6 +14,7 @@
 
   const rt = $derived(apps.runtimeOf(entry.id));
   const isRunning = $derived(rt.status === "running");
+  const isFocused = $derived(apps.focusedId === entry.id);
   const crashed = $derived(
     rt.status === "stopped" && rt.exitCode != null && rt.exitCode !== 0,
   );
@@ -44,7 +45,11 @@
   }
 </script>
 
-<div class="flex items-center gap-3 rounded-md border bg-card px-3 py-2">
+<div
+  class="flex items-center gap-3 rounded-md border px-3 py-2 {isFocused
+    ? 'bg-accent'
+    : 'bg-card'}"
+>
   <span
     class="size-2.5 shrink-0 rounded-full {crashed ? 'bg-destructive' : ''}"
     style={crashed ? "" : `background-color: ${entry.tag}`}
@@ -64,7 +69,13 @@
     disabled={rt.status === "starting"}
     aria-label="Toggle {entry.name}"
   />
-  <Button variant="ghost" size="icon" disabled aria-label="View output">
+  <Button
+    variant="ghost"
+    size="icon"
+    aria-label="View output"
+    aria-pressed={isFocused}
+    onclick={() => apps.focus(entry.id)}
+  >
     <Eye class="size-4" />
   </Button>
   <AlertDialog.Root bind:open={confirmOpen}>
