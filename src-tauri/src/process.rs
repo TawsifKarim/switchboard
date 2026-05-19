@@ -26,6 +26,12 @@ pub struct StatusSnapshot {
     pub last_exit: Option<i32>,
 }
 
+/// Payload for `app:<id>:exit` events. Matches PLAN.md §5.
+#[derive(Clone, Debug, Serialize)]
+pub struct ExitPayload {
+    pub code: i32,
+}
+
 pub struct RunningApp {
     pub pid: u32,
     pub broadcast_tx: broadcast::Sender<Vec<u8>>,
@@ -37,6 +43,10 @@ pub struct RunningApp {
 struct Inner {
     running: HashMap<String, RunningApp>,
     last_exit: HashMap<String, i32>,
+    /// Ids whose start() is mid-flight (spawn between dup-check and insert).
+    /// Prevents a concurrent second start from passing the dup-check and
+    /// leaking a child by overwriting the first RunningApp.
+    starting: std::collections::HashSet<String>,
 }
 
 pub struct ProcessManager {
@@ -50,6 +60,7 @@ impl ProcessManager {
             inner: Arc::new(Mutex::new(Inner {
                 running: HashMap::new(),
                 last_exit: HashMap::new(),
+                starting: std::collections::HashSet::new(),
             })),
             log_dir,
         }
@@ -66,7 +77,8 @@ impl ProcessManager {
             entry,
             Box::new(move |id, code| {
                 use tauri::Emitter;
-                let _ = app_for_cb.emit(&format!("app:{id}:exit"), code);
+                // Payload shape `{ code: i32 }` per PLAN.md §5.
+                let _ = app_for_cb.emit(&format!("app:{id}:exit"), ExitPayload { code });
             }),
         )
         .await
@@ -80,13 +92,37 @@ impl ProcessManager {
     ) -> Result<u32> {
         let id = entry.id.clone();
 
-        // Duplicate check.
+        // Atomic dup-check + claim. Holding `starting` for the duration of
+        // spawn prevents a second concurrent start(id) from passing the
+        // running-map check and leaking a child by overwriting the first
+        // RunningApp on insert. Released on success (after insert) or via
+        // the StartGuard's Drop on any error path.
         {
-            let inner = self.inner.lock().unwrap();
-            if inner.running.contains_key(&id) {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.running.contains_key(&id) || inner.starting.contains(&id) {
                 return Err(anyhow!("app {id} already running"));
             }
+            inner.starting.insert(id.clone());
         }
+        struct StartGuard {
+            inner: Arc<Mutex<Inner>>,
+            id: String,
+            armed: bool,
+        }
+        impl Drop for StartGuard {
+            fn drop(&mut self) {
+                if self.armed {
+                    if let Ok(mut g) = self.inner.lock() {
+                        g.starting.remove(&self.id);
+                    }
+                }
+            }
+        }
+        let mut guard = StartGuard {
+            inner: self.inner.clone(),
+            id: id.clone(),
+            armed: true,
+        };
 
         std::fs::create_dir_all(&self.log_dir)
             .with_context(|| format!("creating log dir {}", self.log_dir.display()))?;
@@ -172,7 +208,7 @@ impl ProcessManager {
             notify_for_waiter.notify_one();
         });
 
-        // Insert into the map.
+        // Insert into the map and release the starting claim atomically.
         {
             let mut inner = self.inner.lock().unwrap();
             inner.running.insert(
@@ -187,7 +223,9 @@ impl ProcessManager {
             );
             // A fresh run clears stale last_exit.
             inner.last_exit.remove(&id);
+            inner.starting.remove(&id);
         }
+        guard.armed = false; // already released above
 
         Ok(pid)
     }
@@ -564,6 +602,58 @@ mod tests {
             combined.contains("tick"),
             "expected 'tick' in subscribed output, got: {combined:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn second_start_with_same_id_is_rejected() {
+        let dir = tempdir().unwrap();
+        let pm = ProcessManager::new(dir.path().to_path_buf());
+        let (cb1, _) = exit_recorder();
+        pm.start_with_callback(test_entry("dup", "sleep 5"), cb1)
+            .await
+            .unwrap();
+        let (cb2, _) = exit_recorder();
+        let err = pm
+            .start_with_callback(test_entry("dup", "sleep 5"), cb2)
+            .await
+            .err()
+            .expect("second start should error");
+        assert!(
+            err.to_string().contains("already running"),
+            "unexpected error: {err}"
+        );
+        pm.stop("dup").await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_starts_with_same_id_only_one_wins() {
+        // Exercises the StartGuard race fix: two start() calls fired at once,
+        // exactly one should succeed and the other should error. Without the
+        // `starting` set, both can pass the dup check and the second's spawn
+        // leaks because it overwrites the first RunningApp in the map.
+        let dir = tempdir().unwrap();
+        let pm = Arc::new(ProcessManager::new(dir.path().to_path_buf()));
+        let pm1 = pm.clone();
+        let pm2 = pm.clone();
+        let (cb1, _) = exit_recorder();
+        let (cb2, _) = exit_recorder();
+        let h1 = tokio::spawn(async move {
+            pm1.start_with_callback(test_entry("race", "sleep 5"), cb1)
+                .await
+        });
+        let h2 = tokio::spawn(async move {
+            pm2.start_with_callback(test_entry("race", "sleep 5"), cb2)
+                .await
+        });
+        let (r1, r2) = tokio::join!(h1, h2);
+        let r1 = r1.unwrap();
+        let r2 = r2.unwrap();
+        let oks = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
+        assert_eq!(
+            oks, 1,
+            "exactly one start should succeed, got {oks}: {r1:?} / {r2:?}"
+        );
+        pm.stop("race").await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
