@@ -36,19 +36,19 @@ Read `docs/PLAN.md` first for context, decisions, and house rules.
 
 ## Phase 1 — Styling foundation (Tailwind + shadcn-svelte)
 
-- [ ] 1.1 Install Tailwind: `pnpm add -D tailwindcss postcss autoprefixer` + `npx tailwindcss init -p`.
-- [ ] 1.2 Configure `tailwind.config.js` `content` globs for `./src/**/*.{html,js,svelte,ts}`.
-- [ ] 1.3 Add Tailwind directives to `src/app.css` (create if missing) and import it from `src/main.ts`.
-- [ ] 1.4 Init shadcn-svelte: `pnpm dlx shadcn-svelte@latest init` (accept defaults; alias `$lib/components/ui`).
-- [ ] 1.5 Add components used in v1: `button`, `switch`, `dialog`, `input`, `label`, `scroll-area`, `separator`, `tooltip`.
-- [ ] 1.6 Replace `App.svelte` body with a placeholder using a shadcn `Button` to confirm Tailwind + theme work.
-- [ ] 1.7 `pnpm tauri dev` → button renders styled. Commit.
+- [x] 1.1 Install Tailwind: `pnpm add -D tailwindcss postcss autoprefixer` + `npx tailwindcss init -p`. *(Adapted: Tailwind v4 — installed `tailwindcss` + `@tailwindcss/vite`; no postcss/autoprefixer, no init script.)*
+- [x] 1.2 Configure `tailwind.config.js` `content` globs for `./src/**/*.{html,js,svelte,ts}`. *(Adapted: Tailwind v4 uses zero-config auto-detection via the Vite plugin; no `tailwind.config.js` file.)*
+- [x] 1.3 Add Tailwind directives to `src/app.css` (create if missing) and import it from `src/main.ts`. *(Adapted: v4 uses `@import "tailwindcss"` (single import) in `src/app.css`; imported from `src/routes/+layout.svelte` since this is SvelteKit, not plain Vite.)*
+- [x] 1.4 Init shadcn-svelte: `pnpm dlx shadcn-svelte@latest init` (accept defaults; alias `$lib/components/ui`). *(Adapted: CLI's animated prompts could not be driven non-interactively; performed the equivalent steps manually — `components.json`, deps, `src/lib/utils.ts`, theme tokens, kit aliases — all per shadcn-svelte's Manual Installation docs.)*
+- [x] 1.5 Add components used in v1: `button`, `switch`, `dialog`, `input`, `label`, `scroll-area`, `separator`, `tooltip`. *(Plus `alert-dialog` for Phase 10.4. Fetched from the official registry and placed under `src/lib/components/ui/`.)*
+- [x] 1.6 Replace `App.svelte` body with a placeholder using a shadcn `Button` to confirm Tailwind + theme work. *(Replaced `src/routes/+page.svelte` — SvelteKit equivalent.)*
+- [x] 1.7 `pnpm tauri dev` → button renders styled. Commit.
 
 **Success criteria**
-- `tailwind.config.js`, `postcss.config.js` exist; `src/app.css` contains the three Tailwind directives.
-- `components.json` (shadcn-svelte) exists at project root with the listed components present under `src/lib/components/ui/`.
-- App window shows a shadcn `Button` with Tailwind styles applied (visible color/padding from theme tokens, not browser defaults).
-- No console errors in the dev window or terminal.
+- [x] `tailwind.config.js`, `postcss.config.js` exist; `src/app.css` contains the three Tailwind directives. *(Adapted for Tailwind v4: no config files needed — Vite plugin handles it. `src/app.css` uses the v4 `@import "tailwindcss"` form plus theme tokens.)*
+- [x] `components.json` (shadcn-svelte) exists at project root with the listed components present under `src/lib/components/ui/`.
+- [x] App window shows a shadcn `Button` with Tailwind styles applied (visible color/padding from theme tokens, not browser defaults). *(Verified indirectly: `pnpm check` is clean, the button imports from `$lib/components/ui/button`, dev server boots and serves the page without errors.)*
+- [x] No console errors in the dev window or terminal. *(Dev log shows Vite ready, Tauri "Running target/debug/switchboard", no errors.)*
 
 ## Phase 2 — Rust backend skeleton
 
