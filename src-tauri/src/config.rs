@@ -60,6 +60,14 @@ pub fn load(path: &Path) -> Result<Vec<AppEntry>> {
         Ok(bytes) => {
             let cfg: ConfigFile = serde_json::from_slice(&bytes)
                 .with_context(|| format!("parsing config file at {}", path.display()))?;
+            if cfg.version != CONFIG_VERSION {
+                return Err(anyhow::anyhow!(
+                    "unsupported config version {} at {} (expected {}); refusing to load to avoid data loss",
+                    cfg.version,
+                    path.display(),
+                    CONFIG_VERSION
+                ));
+            }
             Ok(cfg.apps)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
@@ -102,15 +110,34 @@ pub fn save(path: &Path, apps: &[AppEntry]) -> Result<()> {
         format!("renaming {} -> {}", tmp_path.display(), path.display())
     })?;
 
+    // Make the rename itself durable: on POSIX the directory entry change is
+    // only persisted after fsyncing the parent directory.
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Ok(dir) = fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+    }
+
     Ok(())
 }
 
+/// Append a new entry. Rejects duplicate `id` (caller is expected to generate
+/// fresh ULIDs — collisions indicate a bug).
 pub fn add(path: &Path, entry: AppEntry) -> Result<()> {
     let mut apps = load(path)?;
+    if apps.iter().any(|a| a.id == entry.id) {
+        return Err(anyhow::anyhow!("duplicate app id: {}", entry.id));
+    }
     apps.push(entry);
     save(path, &apps)
 }
 
+/// Remove the entry with the given `id`. Idempotent: deleting an unknown id
+/// is a no-op (still rewrites the file). UI confirms before calling, so a
+/// missing id is not an error condition worth surfacing.
 pub fn delete(path: &Path, id: &str) -> Result<()> {
     let mut apps = load(path)?;
     apps.retain(|a| a.id != id);
@@ -183,6 +210,39 @@ mod tests {
         // No leftover temp file.
         let tmp = path.with_file_name("apps.json.tmp");
         assert!(!tmp.exists(), "temp file should not remain after rename");
+    }
+
+    #[test]
+    fn load_rejects_unknown_version() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let bad = serde_json::json!({ "version": 99, "apps": [] });
+        fs::write(&path, serde_json::to_vec_pretty(&bad).unwrap()).unwrap();
+        let err = load(&path).unwrap_err().to_string();
+        assert!(err.contains("unsupported config version 99"), "got: {err}");
+    }
+
+    #[test]
+    fn add_rejects_duplicate_id() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let entry = sample("01H1");
+        add(&path, entry.clone()).unwrap();
+        let err = add(&path, entry).unwrap_err().to_string();
+        assert!(err.contains("duplicate app id"), "got: {err}");
+        // File state unchanged after rejection.
+        assert_eq!(load(&path).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn delete_unknown_id_is_noop() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        add(&path, sample("01H1")).unwrap();
+        delete(&path, "does-not-exist").unwrap();
+        let after = load(&path).unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].id, "01H1");
     }
 
     #[test]
