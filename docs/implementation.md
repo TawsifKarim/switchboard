@@ -52,7 +52,7 @@ Read `docs/PLAN.md` first for context, decisions, and house rules.
 
 ## Phase 2 — Rust backend skeleton
 
-- [ ] 2.1 Add Rust deps in `src-tauri/Cargo.toml`:
+- [x] 2.1 Add Rust deps in `src-tauri/Cargo.toml`:
   - `tokio = { version = "1", features = ["full"] }`
   - `portable-pty = "0.8"`
   - `serde = { version = "1", features = ["derive"] }`, `serde_json = "1"`
@@ -60,9 +60,9 @@ Read `docs/PLAN.md` first for context, decisions, and house rules.
   - `nix = { version = "0.29", features = ["signal"] }` (unix target)
   - `anyhow = "1"`, `thiserror = "1"`
   - `tauri-plugin-dialog = "2"`
-- [ ] 2.2 Create empty modules: `src-tauri/src/{config.rs, process.rs, commands.rs, tray.rs}` and `mod` them from `lib.rs`.
-- [ ] 2.3 Register `tauri-plugin-dialog` in `lib.rs` builder.
-- [ ] 2.4 `pnpm tauri dev` still builds and runs.
+- [x] 2.2 Create empty modules: `src-tauri/src/{config.rs, process.rs, commands.rs, tray.rs}` and `mod` them from `lib.rs`.
+- [x] 2.3 Register `tauri-plugin-dialog` in `lib.rs` builder.
+- [x] 2.4 `pnpm tauri dev` still builds and runs.
 
 **Success criteria**
 - `cargo check` (run from `src-tauri/`) succeeds with all listed deps resolved.
