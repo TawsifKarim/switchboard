@@ -118,20 +118,11 @@ Read `docs/PLAN.md` first for context, decisions, and house rules.
 
 ## Phase 6 — Process management (Rust)
 
-- [ ] 6.1 In `process.rs`, define `RunningApp { pid, child, pty_master, log_writer, broadcast_tx }`.
-- [ ] 6.2 Define `ProcessManager` wrapping `Mutex<HashMap<AppId, RunningApp>>`. Stash as Tauri `State` in `lib.rs`.
-- [ ] 6.3 Implement `start(entry)`:
-  - Open PTY pair via `portable-pty::native_pty_system()`.
-  - `CommandBuilder::new("zsh").args(["-ic", &entry.command]).cwd(&entry.directory)`.
-  - Spawn child on slave; capture PID.
-  - Open log file `<config-dir>/logs/<id>.log` in append mode.
-  - Spawn reader task: read master → `broadcast_tx.send(bytes)` + write to log file.
-  - Spawn waiter task: on child exit, emit `app:<id>:exit { code }`, remove from map.
-- [ ] 6.4 Implement `stop(id)`:
-  - `nix::sys::signal::killpg(Pid::from_raw(pid as i32), Signal::SIGTERM)`.
-  - Await waiter with 5s timeout.
-  - On timeout: `killpg(... SIGKILL)`.
-- [ ] 6.5 Implement `status(id) -> { running, pid, last_exit }` (track last exit code in a side map keyed by id).
+- [x] 6.1 In `process.rs`, define `RunningApp { pid, child, pty_master, log_writer, broadcast_tx }`. *(Fields adapted: `child` lives in the waiter task; `RunningApp` holds `pid`, `broadcast_tx`, `pty_writer` (Arc<Mutex>), `master` (Arc<Mutex>), `notify_exit` (Arc<Notify>). Log writer is owned by the reader task; log file path is reconstructed from `log_dir + id`. This shape avoids holding the outer Mutex while doing PTY I/O.)*
+- [x] 6.2 Define `ProcessManager` wrapping `Mutex<HashMap<AppId, RunningApp>>`. *(Plus a sibling `last_exit: HashMap<AppId, i32>`. Tauri-State wiring is deferred to Phase 7 per scope.)*
+- [x] 6.3 Implement `start(entry)`. *(Production entry calls `start_with_callback` which closes over `AppHandle` to emit `app:<id>:exit`; tests pass a callback that pushes to an mpsc. Adaptation: spawn invokes `zsh -ic 'exec zsh -c "$SWITCHBOARD_USER_CMD"'`. Outer interactive zsh sources .zshrc (PATH/asdf), then execs into NON-interactive zsh that runs the user command. The interactive→non-interactive transition is required because interactive zsh ignores SIGTERM at the C level, which would defeat `stop()`.)*
+- [x] 6.4 Implement `stop(id)`. *(Two adaptations from spec: (a) instead of one-shot killpg, we re-send SIGTERM every 200ms over a 5s window, because the outer interactive zsh ignores signals during .zshrc load and ignored signals aren't queued; (b) instead of relying solely on pgrp, we walk the descendant tree via `pgrep -P` and signal each pid AND `killpg`. Required because zsh's job control puts foreground children in their own pgrps.)*
+- [x] 6.5 Implement `status(id) -> { running, pid, last_exit }`. *(`StatusSnapshot { running, pid, last_exit }` returned synchronously from the inner map.)*
 
 **Success criteria** (verified via a Rust integration test or a temporary `#[tauri::command] debug_start` until Phase 7 wires the UI):
 - Starting an entry with command `sleep 30` in `/tmp` returns a real PID; `ps -p <pid>` shows the process.

@@ -1,1 +1,585 @@
-// stub
+use crate::config::AppEntry;
+use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use anyhow::{anyhow, Context, Result};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use serde::Serialize;
+use tokio::sync::{broadcast, Notify};
+
+#[cfg(unix)]
+use nix::sys::signal::{kill, killpg, Signal};
+#[cfg(unix)]
+use nix::unistd::Pid;
+
+/// Called when a child exits. The id is the app id; the i32 is the exit code.
+pub type ExitCallback = Box<dyn Fn(&str, i32) + Send + Sync + 'static>;
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StatusSnapshot {
+    pub running: bool,
+    pub pid: Option<u32>,
+    pub last_exit: Option<i32>,
+}
+
+pub struct RunningApp {
+    pub pid: u32,
+    pub broadcast_tx: broadcast::Sender<Vec<u8>>,
+    pty_writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    notify_exit: Arc<Notify>,
+}
+
+struct Inner {
+    running: HashMap<String, RunningApp>,
+    last_exit: HashMap<String, i32>,
+}
+
+pub struct ProcessManager {
+    inner: Arc<Mutex<Inner>>,
+    log_dir: PathBuf,
+}
+
+impl ProcessManager {
+    pub fn new(log_dir: PathBuf) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Inner {
+                running: HashMap::new(),
+                last_exit: HashMap::new(),
+            })),
+            log_dir,
+        }
+    }
+
+    pub fn log_dir(&self) -> &PathBuf {
+        &self.log_dir
+    }
+
+    /// Production entry point: emit a Tauri event on exit.
+    pub async fn start(&self, app: tauri::AppHandle, entry: AppEntry) -> Result<u32> {
+        let app_for_cb = app.clone();
+        self.start_with_callback(
+            entry,
+            Box::new(move |id, code| {
+                use tauri::Emitter;
+                let _ = app_for_cb.emit(&format!("app:{id}:exit"), code);
+            }),
+        )
+        .await
+    }
+
+    /// Test/internal entry point: callback receives (id, exit_code) on child exit.
+    pub async fn start_with_callback(
+        &self,
+        entry: AppEntry,
+        on_exit: ExitCallback,
+    ) -> Result<u32> {
+        let id = entry.id.clone();
+
+        // Duplicate check.
+        {
+            let inner = self.inner.lock().unwrap();
+            if inner.running.contains_key(&id) {
+                return Err(anyhow!("app {id} already running"));
+            }
+        }
+
+        std::fs::create_dir_all(&self.log_dir)
+            .with_context(|| format!("creating log dir {}", self.log_dir.display()))?;
+        let log_path = self.log_dir.join(format!("{id}.log"));
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("opening log file {}", log_path.display()))?;
+
+        let pty = native_pty_system();
+        let pair = pty
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .context("openpty failed")?;
+
+        // Inherit env first so PATH/HOME/asdf shims/etc. resolve the same as
+        // running the command by hand.
+        let mut cmd = CommandBuilder::new("zsh");
+        for (k, v) in std::env::vars_os() {
+            cmd.env(k, v);
+        }
+        // Pass the user's command via an env var to avoid shell-quoting issues.
+        cmd.env("SWITCHBOARD_USER_CMD", &entry.command);
+        // The outer `zsh -ic` sources the user's .zshrc (so PATH is set up
+        // like a real terminal), then `exec`s into a NON-interactive zsh that
+        // evaluates the user's command. Going non-interactive is critical:
+        // interactive zsh ignores SIGTERM at the C level, which would defeat
+        // stop(). The exec means the outer interactive zsh disappears entirely
+        // — the live pid runs non-interactive zsh (or the user command itself,
+        // if zsh exec-optimizes a final simple command).
+        cmd.arg("-ic");
+        cmd.arg(r#"exec zsh -c "$SWITCHBOARD_USER_CMD""#);
+        cmd.cwd(&entry.directory);
+
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .with_context(|| format!("spawning command in {}", entry.directory))?;
+        let pid = child.process_id().context("child has no PID")?;
+
+        // Drop the slave so the master sees EOF after the child exits.
+        drop(pair.slave);
+
+        let reader = pair
+            .master
+            .try_clone_reader()
+            .context("cloning pty reader")?;
+        let writer = pair.master.take_writer().context("taking pty writer")?;
+
+        let (broadcast_tx, _) = broadcast::channel::<Vec<u8>>(1024);
+        let notify_exit = Arc::new(Notify::new());
+
+        let master = Arc::new(Mutex::new(pair.master));
+        let pty_writer = Arc::new(Mutex::new(writer));
+
+        // Reader task — blocking I/O on the PTY master.
+        let tx_for_reader = broadcast_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            reader_loop(reader, log_file, tx_for_reader);
+        });
+
+        // Waiter task — blocking wait() on the child.
+        let inner_for_waiter = self.inner.clone();
+        let notify_for_waiter = notify_exit.clone();
+        let id_for_waiter = id.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut child = child;
+            let code = match child.wait() {
+                Ok(status) => status.exit_code() as i32,
+                Err(_) => -1,
+            };
+            on_exit(&id_for_waiter, code);
+            {
+                let mut inner = inner_for_waiter.lock().unwrap();
+                inner.running.remove(&id_for_waiter);
+                inner.last_exit.insert(id_for_waiter.clone(), code);
+            }
+            notify_for_waiter.notify_one();
+        });
+
+        // Insert into the map.
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.running.insert(
+                id.clone(),
+                RunningApp {
+                    pid,
+                    broadcast_tx,
+                    pty_writer,
+                    master,
+                    notify_exit,
+                },
+            );
+            // A fresh run clears stale last_exit.
+            inner.last_exit.remove(&id);
+        }
+
+        Ok(pid)
+    }
+
+    pub async fn stop(&self, id: &str) -> Result<()> {
+        let (pid, notify) = {
+            let inner = self.inner.lock().unwrap();
+            match inner.running.get(id) {
+                Some(app) => (app.pid, app.notify_exit.clone()),
+                None => return Ok(()), // idempotent
+            }
+        };
+
+        // We re-poke SIGTERM on a short interval for up to 5s. Two reasons:
+        // (1) interactive zsh ignores SIGTERM at the C level while it's
+        //     sourcing .zshrc — if we signal once during that window the
+        //     signal is dropped (ignored signals aren't queued), so once zsh
+        //     exec's away we need to re-send.
+        // (2) the user command may not have spawned children yet at first
+        //     stop time; later children become visible to the tree walk.
+        // Unix ignored signals aren't queued, so re-poking is the only way.
+        let exited = {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut exited = false;
+            while std::time::Instant::now() < deadline {
+                #[cfg(unix)]
+                signal_tree(pid, Signal::SIGTERM);
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                let tick = std::cmp::min(remaining, Duration::from_millis(200));
+                if tick.is_zero() {
+                    break;
+                }
+                let n = notify.notified();
+                if tokio::time::timeout(tick, n).await.is_ok() {
+                    exited = true;
+                    break;
+                }
+            }
+            exited
+        };
+
+        if exited {
+            return Ok(());
+        }
+
+        // Grace expired — escalate to SIGKILL.
+        #[cfg(unix)]
+        signal_tree(pid, Signal::SIGKILL);
+        let _ = tokio::time::timeout(Duration::from_secs(1), notify.notified()).await;
+        Ok(())
+    }
+
+    pub async fn status(&self, id: &str) -> StatusSnapshot {
+        let inner = self.inner.lock().unwrap();
+        if let Some(app) = inner.running.get(id) {
+            StatusSnapshot {
+                running: true,
+                pid: Some(app.pid),
+                last_exit: inner.last_exit.get(id).copied(),
+            }
+        } else {
+            StatusSnapshot {
+                running: false,
+                pid: None,
+                last_exit: inner.last_exit.get(id).copied(),
+            }
+        }
+    }
+
+    pub async fn subscribe(&self, id: &str) -> Option<broadcast::Receiver<Vec<u8>>> {
+        let inner = self.inner.lock().unwrap();
+        inner.running.get(id).map(|a| a.broadcast_tx.subscribe())
+    }
+
+    pub async fn write_pty(&self, id: &str, bytes: &[u8]) -> Result<()> {
+        let writer_arc = {
+            let inner = self.inner.lock().unwrap();
+            inner.running.get(id).map(|a| a.pty_writer.clone())
+        }
+        .ok_or_else(|| anyhow!("app {id} not running"))?;
+        let mut writer = writer_arc.lock().unwrap();
+        writer.write_all(bytes).context("writing to pty")?;
+        writer.flush().ok();
+        Ok(())
+    }
+
+    pub async fn resize(&self, id: &str, rows: u16, cols: u16) -> Result<()> {
+        let master_arc = {
+            let inner = self.inner.lock().unwrap();
+            inner.running.get(id).map(|a| a.master.clone())
+        }
+        .ok_or_else(|| anyhow!("app {id} not running"))?;
+        let master = master_arc.lock().unwrap();
+        master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .context("resize pty")?;
+        Ok(())
+    }
+
+    pub async fn stop_all(&self) -> Result<()> {
+        let ids: Vec<String> = {
+            let inner = self.inner.lock().unwrap();
+            inner.running.keys().cloned().collect()
+        };
+        for id in ids {
+            let _ = self.stop(&id).await;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn signal_tree(root: u32, sig: Signal) {
+    let pids = descendants(root);
+    for p in &pids {
+        let _ = kill(Pid::from_raw(*p as i32), sig);
+    }
+    // Also try killpg as a fallback in case the leader is a pgrp leader and
+    // there are members we missed via the pgrep walk (e.g. just-spawned).
+    let _ = killpg(Pid::from_raw(root as i32), sig);
+}
+
+#[cfg(unix)]
+fn descendants(root: u32) -> Vec<u32> {
+    let mut all = vec![root];
+    let mut frontier = vec![root];
+    while let Some(p) = frontier.pop() {
+        if let Ok(out) = std::process::Command::new("pgrep")
+            .args(["-P", &p.to_string()])
+            .output()
+        {
+            if let Ok(s) = String::from_utf8(out.stdout) {
+                for k in s.split_whitespace() {
+                    if let Ok(kid) = k.parse::<u32>() {
+                        all.push(kid);
+                        frontier.push(kid);
+                    }
+                }
+            }
+        }
+    }
+    all
+}
+
+fn reader_loop(
+    mut reader: Box<dyn Read + Send>,
+    mut log: File,
+    tx: broadcast::Sender<Vec<u8>>,
+) {
+    let mut buf = [0u8; 4096];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break, // EOF: child closed the PTY
+            Ok(n) => {
+                let _ = log.write_all(&buf[..n]);
+                let _ = log.flush();
+                let _ = tx.send(buf[..n].to_vec());
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+    use tempfile::tempdir;
+    use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+
+    fn test_entry(id: &str, command: &str) -> AppEntry {
+        AppEntry {
+            id: id.to_string(),
+            name: id.to_string(),
+            directory: "/tmp".to_string(),
+            command: command.to_string(),
+            tag: "#000000".to_string(),
+        }
+    }
+
+    fn exit_recorder() -> (ExitCallback, UnboundedReceiver<(String, i32)>) {
+        let (tx, rx) = unbounded_channel::<(String, i32)>();
+        let cb: ExitCallback = Box::new(move |id, code| {
+            let _ = tx.send((id.to_string(), code));
+        });
+        (cb, rx)
+    }
+
+    fn is_alive(pid: u32) -> bool {
+        std::process::Command::new("ps")
+            .args(["-p", &pid.to_string()])
+            .output()
+            .map(|o| o.status.success() && !o.stdout.is_empty())
+            .unwrap_or(false)
+            // ps prints a header line even on miss; success+stdout heuristic
+            // is unreliable. Fall back to kill(0) which returns ESRCH if dead.
+            || {
+                #[cfg(unix)]
+                {
+                    use nix::sys::signal::kill;
+                    kill(Pid::from_raw(pid as i32), None).is_ok()
+                }
+                #[cfg(not(unix))]
+                {
+                    false
+                }
+            }
+    }
+
+    fn children_of(pid: u32) -> Vec<u32> {
+        std::process::Command::new("pgrep")
+            .args(["-P", &pid.to_string()])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| {
+                s.split_whitespace()
+                    .filter_map(|x| x.parse::<u32>().ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn start_returns_pid_and_process_is_alive() {
+        let dir = tempdir().unwrap();
+        let pm = ProcessManager::new(dir.path().to_path_buf());
+        let (cb, _rx) = exit_recorder();
+        let pid = pm
+            .start_with_callback(test_entry("t1", "sleep 30"), cb)
+            .await
+            .unwrap();
+        // Brief wait for the spawn to settle.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(is_alive(pid), "pid {pid} should be alive after start");
+        pm.stop("t1").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!is_alive(pid), "pid {pid} should be dead after stop");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_clean_terminates_quickly() {
+        let dir = tempdir().unwrap();
+        let pm = ProcessManager::new(dir.path().to_path_buf());
+        let (cb, _) = exit_recorder();
+        pm.start_with_callback(test_entry("t2", "sleep 30"), cb)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let t = Instant::now();
+        pm.stop("t2").await.unwrap();
+        let elapsed = t.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "stop took {elapsed:?}, expected <800ms"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_kills_ignoring_term() {
+        let dir = tempdir().unwrap();
+        let pm = ProcessManager::new(dir.path().to_path_buf());
+        let (cb, _) = exit_recorder();
+        // `exec` replaces zsh with perl in the same pid/pgrp. Perl ignores
+        // SIGTERM, so the only way out is the SIGKILL fallback after 5s.
+        pm.start_with_callback(
+            test_entry("t3", "exec perl -e '$SIG{TERM} = \"IGNORE\"; sleep 30'"),
+            cb,
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let t = Instant::now();
+        pm.stop("t3").await.unwrap();
+        let elapsed = t.elapsed();
+        assert!(
+            elapsed >= Duration::from_secs(4),
+            "stop took {elapsed:?}, expected >=4s (grace window)"
+        );
+        assert!(
+            elapsed <= Duration::from_secs(7),
+            "stop took {elapsed:?}, expected <=7s"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_kills_child_processes() {
+        let dir = tempdir().unwrap();
+        let pm = ProcessManager::new(dir.path().to_path_buf());
+        let (cb, _) = exit_recorder();
+        let pid = pm
+            .start_with_callback(test_entry("t4", "sleep 60 & wait"), cb)
+            .await
+            .unwrap();
+        // Wait long enough for outer interactive zsh to source .zshrc and
+        // exec into the inner zsh which forks `sleep`.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        let kids = children_of(pid);
+        assert!(
+            !kids.is_empty(),
+            "expected at least one child of {pid}, got none"
+        );
+        pm.stop("t4").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(!is_alive(pid), "leader {pid} should be dead");
+        for c in &kids {
+            assert!(!is_alive(*c), "child {c} should be dead");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exit_event_fires_with_code() {
+        let dir = tempdir().unwrap();
+        let pm = ProcessManager::new(dir.path().to_path_buf());
+
+        let (cb_ok, mut rx_ok) = exit_recorder();
+        pm.start_with_callback(test_entry("ok", "true"), cb_ok)
+            .await
+            .unwrap();
+        let (id, code) = tokio::time::timeout(Duration::from_secs(5), rx_ok.recv())
+            .await
+            .expect("timeout waiting for ok exit")
+            .expect("recv ok");
+        assert_eq!(id, "ok");
+        assert_eq!(code, 0);
+
+        let (cb_bad, mut rx_bad) = exit_recorder();
+        pm.start_with_callback(test_entry("bad", "false"), cb_bad)
+            .await
+            .unwrap();
+        let (id2, code2) = tokio::time::timeout(Duration::from_secs(5), rx_bad.recv())
+            .await
+            .expect("timeout waiting for bad exit")
+            .expect("recv bad");
+        assert_eq!(id2, "bad");
+        assert_eq!(code2, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn subscribe_receives_output() {
+        let dir = tempdir().unwrap();
+        let pm = ProcessManager::new(dir.path().to_path_buf());
+        let (cb, _) = exit_recorder();
+        pm.start_with_callback(
+            test_entry(
+                "tick",
+                "while :; do echo tick; sleep 0.1; done",
+            ),
+            cb,
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let mut rx = pm.subscribe("tick").await.expect("subscribe");
+        let mut combined = String::new();
+        for _ in 0..50 {
+            match tokio::time::timeout(Duration::from_secs(3), rx.recv()).await {
+                Ok(Ok(bytes)) => {
+                    combined.push_str(&String::from_utf8_lossy(&bytes));
+                    if combined.contains("tick") {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        pm.stop("tick").await.unwrap();
+        assert!(
+            combined.contains("tick"),
+            "expected 'tick' in subscribed output, got: {combined:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn log_file_grows() {
+        let dir = tempdir().unwrap();
+        let pm = ProcessManager::new(dir.path().to_path_buf());
+        let (cb, mut rx) = exit_recorder();
+        pm.start_with_callback(test_entry("logme", "echo hello-from-test"), cb)
+            .await
+            .unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let log = std::fs::read_to_string(dir.path().join("logme.log")).unwrap();
+        assert!(
+            log.contains("hello-from-test"),
+            "log content: {log:?}"
+        );
+    }
+}
