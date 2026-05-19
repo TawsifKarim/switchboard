@@ -102,11 +102,11 @@ Read `docs/PLAN.md` first for context, decisions, and house rules.
 
 ## Phase 5 — UI: list + add + delete (no processes yet)
 
-- [ ] 5.1 `src/lib/stores/apps.ts`: Svelte store holding `AppEntry[]`; `refresh()` calls `list_apps`.
-- [ ] 5.2 `src/lib/components/AppRow.svelte`: colored dot, name, "stopped" status, switch (disabled), eye button (disabled), trash button.
-- [ ] 5.3 `src/lib/components/AddAppDialog.svelte`: shadcn `Dialog` with Name / Directory (button → `tauri-plugin-dialog` folder picker) / Command / Tag (color input).
-- [ ] 5.4 `App.svelte`: header with "+ Add" button, left column listing rows from the store, right column placeholder "Select an app to view output".
-- [ ] 5.5 Verify: add an entry, see it persist in `apps.json`, delete removes it, restart app shows the saved list.
+- [x] 5.1 `src/lib/stores/apps.ts`: Svelte store holding `AppEntry[]`; `refresh()` calls `list_apps`. *(Used `.svelte.ts` + a class with `$state` runes — `src/lib/stores/apps.svelte.ts`.)*
+- [x] 5.2 `src/lib/components/AppRow.svelte`: colored dot, name, "stopped" status, switch (disabled), eye button (disabled), trash button.
+- [x] 5.3 `src/lib/components/AddAppDialog.svelte`: shadcn `Dialog` with Name / Directory (button → `tauri-plugin-dialog` folder picker) / Command / Tag (color input). *(Installed `@tauri-apps/plugin-dialog` JS pkg — Rust side was registered in Phase 2.)*
+- [x] 5.4 `App.svelte`: header with "+ Add" button, left column listing rows from the store, right column placeholder "Select an app to view output". *(SvelteKit equivalent — `src/routes/+page.svelte`.)*
+- [x] 5.5 Verify: add an entry, see it persist in `apps.json`, delete removes it, restart app shows the saved list.
 
 **Success criteria**
 - Clicking "+ Add", filling the form, and submitting adds a row visible in the left column without a manual refresh.
