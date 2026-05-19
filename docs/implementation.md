@@ -88,10 +88,10 @@ Read `docs/PLAN.md` first for context, decisions, and house rules.
 
 ## Phase 4 — IPC commands (no process logic yet)
 
-- [ ] 4.1 In `commands.rs`, implement `#[tauri::command] list_apps`, `add_app(name, directory, command, tag)`, `delete_app(id)` — all backed by config layer only.
-- [ ] 4.2 Generate ULID on `add_app`. Reject empty name/directory/command.
-- [ ] 4.3 Register all commands in `lib.rs` `invoke_handler`.
-- [ ] 4.4 Create `src/lib/ipc.ts` typed wrappers around `invoke()`.
+- [x] 4.1 In `commands.rs`, implement `#[tauri::command] list_apps`, `add_app(name, directory, command, tag)`, `delete_app(id)` — all backed by config layer only.
+- [x] 4.2 Generate ULID on `add_app`. Reject empty name/directory/command. *(Also validates `directory` is an existing dir; tag defaults to slate-500 `#64748b` if empty.)*
+- [x] 4.3 Register all commands in `lib.rs` `invoke_handler`. *(Removed the scaffold `greet` command.)*
+- [x] 4.4 Create `src/lib/ipc.ts` typed wrappers around `invoke()`.
 
 **Success criteria**
 - From the dev window's devtools console: `await window.__TAURI__.core.invoke('list_apps')` returns `[]` on a fresh install.
