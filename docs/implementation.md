@@ -24,10 +24,10 @@ Read `docs/PLAN.md` first for context, decisions, and house rules.
 
 ## Phase 0 — Project bootstrap
 
-- [ ] 0.1 Run `pnpm install` at project root.
-- [ ] 0.2 Verify dev shell launches: `pnpm tauri dev` → Tauri window opens with the default Svelte template.
-- [ ] 0.3 Close it. Initialize git: `git init && git add . && git commit -m "scaffold"`.
-- [ ] 0.4 Confirm `.gitignore` covers `target/`, `node_modules/`, `dist/`, `apps.json`, `logs/`.
+- [x] 0.1 Run `pnpm install` at project root.
+- [x] 0.2 Verify dev shell launches: `pnpm tauri dev` → Tauri window opens with the default Svelte template.
+- [x] 0.3 Close it. Initialize git: `git init && git add . && git commit -m "scaffold"`.
+- [x] 0.4 Confirm `.gitignore` covers `target/`, `node_modules/`, `dist/`, `apps.json`, `logs/`.
 
 **Success criteria**
 - `pnpm tauri dev` launches a window without errors and is closed cleanly.
