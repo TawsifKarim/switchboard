@@ -136,12 +136,12 @@ Read `docs/PLAN.md` first for context, decisions, and house rules.
 
 ## Phase 7 — Wire start/stop into UI
 
-- [ ] 7.1 Add commands: `start_app(id)`, `stop_app(id)`, `get_status(id)`.
-- [ ] 7.2 Extend `ipc.ts` wrappers + the apps store with a `runtime` map (`id → { status, pid, exitCode }`).
-- [ ] 7.3 Subscribe to `app:<id>:exit` event globally; update runtime map (status → stopped, flag red if non-zero).
-- [ ] 7.4 Enable the row switch: toggle on → `start_app`; toggle off → `stop_app`. Show PID when running.
-- [ ] 7.5 On non-zero exit, row dot/badge turns red and shows exit code.
-- [ ] 7.6 Verify with a long-running command (e.g. `sleep 30` in a tmp dir) and a crashing one (`false`).
+- [x] 7.1 Add commands: `start_app(id)`, `stop_app(id)`, `get_status(id)`.
+- [x] 7.2 Extend `ipc.ts` wrappers + the apps store with a `runtime` map (`id → { status, pid, exitCode }`).
+- [x] 7.3 Subscribe to `app:<id>:exit` event globally; update runtime map (status → stopped, flag red if non-zero). *(Adapted: emit a single global `app-exit` event carrying `{id, code}` instead of per-id event names — simpler frontend wiring, one `listen()` call.)*
+- [x] 7.4 Enable the row switch: toggle on → `start_app`; toggle off → `stop_app`. Show PID when running.
+- [x] 7.5 On non-zero exit, row dot/badge turns red and shows exit code.
+- [x] 7.6 Verify with a long-running command (e.g. `sleep 30` in a tmp dir) and a crashing one (`false`).
 
 **Success criteria**
 - Toggling a row's switch on starts the process; the row shows the correct PID within ~500ms.

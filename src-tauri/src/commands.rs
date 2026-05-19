@@ -1,9 +1,11 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use tauri::AppHandle;
 use ulid::Ulid;
 
 use crate::config::{self, AppEntry};
+use crate::process::{ProcessManager, StatusSnapshot};
 
 const DEFAULT_TAG: &str = "#64748b"; // slate-500
 
@@ -58,6 +60,37 @@ pub async fn add_app(
 pub async fn delete_app(app: AppHandle, id: String) -> Result<(), String> {
     let path = config::config_path(&app).map_err(|e| e.to_string())?;
     config::delete(&path, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn start_app(
+    app: AppHandle,
+    pm: tauri::State<'_, Arc<ProcessManager>>,
+    id: String,
+) -> Result<u32, String> {
+    let path = config::config_path(&app).map_err(|e| e.to_string())?;
+    let apps = config::load(&path).map_err(|e| e.to_string())?;
+    let entry = apps
+        .into_iter()
+        .find(|a| a.id == id)
+        .ok_or_else(|| format!("app not found: {id}"))?;
+    pm.start(app.clone(), entry).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn stop_app(
+    pm: tauri::State<'_, Arc<ProcessManager>>,
+    id: String,
+) -> Result<(), String> {
+    pm.stop(&id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_status(
+    pm: tauri::State<'_, Arc<ProcessManager>>,
+    id: String,
+) -> Result<StatusSnapshot, String> {
+    Ok(pm.status(&id).await)
 }
 
 #[cfg(test)]

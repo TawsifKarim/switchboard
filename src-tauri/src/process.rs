@@ -26,9 +26,11 @@ pub struct StatusSnapshot {
     pub last_exit: Option<i32>,
 }
 
-/// Payload for `app:<id>:exit` events. Matches PLAN.md §5.
+/// Payload for the global `app-exit` event. Carries the id so a single
+/// listener on the frontend can route by app id.
 #[derive(Clone, Debug, Serialize)]
 pub struct ExitPayload {
+    pub id: String,
     pub code: i32,
 }
 
@@ -77,8 +79,14 @@ impl ProcessManager {
             entry,
             Box::new(move |id, code| {
                 use tauri::Emitter;
-                // Payload shape `{ code: i32 }` per PLAN.md §5.
-                let _ = app_for_cb.emit(&format!("app:{id}:exit"), ExitPayload { code });
+                // Single global event; frontend routes by id.
+                let _ = app_for_cb.emit(
+                    "app-exit",
+                    ExitPayload {
+                        id: id.to_string(),
+                        code,
+                    },
+                );
             }),
         )
         .await

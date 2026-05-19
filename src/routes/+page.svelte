@@ -6,7 +6,7 @@
   import { apps } from "$lib/stores/apps.svelte";
 
   onMount(() => {
-    apps.refresh().catch((e) => console.error("listApps failed", e));
+    apps.init().catch((e) => console.error("apps.init failed", e));
   });
 </script>
 

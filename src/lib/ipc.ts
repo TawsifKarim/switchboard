@@ -18,3 +18,16 @@ export const addApp = (
 ) => invoke<AppEntry>("add_app", { name, directory, command, tag });
 
 export const deleteApp = (id: string) => invoke<void>("delete_app", { id });
+
+export type StatusSnapshot = {
+  running: boolean;
+  pid: number | null;
+  last_exit: number | null;
+};
+
+export const startApp = (id: string) => invoke<number>("start_app", { id });
+export const stopApp = (id: string) => invoke<void>("stop_app", { id });
+export const getStatus = (id: string) =>
+  invoke<StatusSnapshot>("get_status", { id });
+
+export type ExitEvent = { id: string; code: number };

@@ -12,6 +12,27 @@
   let confirmOpen = $state(false);
   let deleting = $state(false);
 
+  const rt = $derived(apps.runtimeOf(entry.id));
+  const isRunning = $derived(rt.status === "running");
+  const crashed = $derived(
+    rt.status === "stopped" && rt.exitCode != null && rt.exitCode !== 0,
+  );
+  const statusLabel = $derived.by(() => {
+    if (rt.status === "running") return `PID ${rt.pid}`;
+    if (rt.status === "starting") return "…";
+    if (crashed) return `exit ${rt.exitCode}`;
+    return "stopped";
+  });
+
+  async function onToggle(on: boolean): Promise<void> {
+    try {
+      if (on) await apps.start(entry.id);
+      else await apps.stop(entry.id);
+    } catch (e) {
+      console.error(on ? "start failed" : "stop failed", entry.id, e);
+    }
+  }
+
   async function confirmDelete() {
     deleting = true;
     try {
@@ -25,15 +46,24 @@
 
 <div class="flex items-center gap-3 rounded-md border bg-card px-3 py-2">
   <span
-    class="size-2.5 shrink-0 rounded-full"
-    style="background-color: {entry.tag}"
+    class="size-2.5 shrink-0 rounded-full {crashed ? 'bg-destructive' : ''}"
+    style={crashed ? "" : `background-color: ${entry.tag}`}
     aria-hidden="true"
   ></span>
   <div class="min-w-0 flex-1">
     <div class="truncate text-sm font-medium">{entry.name}</div>
-    <div class="truncate text-xs text-muted-foreground">stopped</div>
+    <div
+      class="truncate text-xs {crashed ? 'text-destructive' : 'text-muted-foreground'}"
+    >
+      {statusLabel}
+    </div>
   </div>
-  <Switch disabled aria-label="Toggle {entry.name}" />
+  <Switch
+    checked={isRunning}
+    onCheckedChange={onToggle}
+    disabled={rt.status === "starting"}
+    aria-label="Toggle {entry.name}"
+  />
   <Button variant="ghost" size="icon" disabled aria-label="View output">
     <Eye class="size-4" />
   </Button>
