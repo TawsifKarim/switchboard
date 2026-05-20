@@ -253,3 +253,34 @@ adds a "terminating…" loader on the row during the stop window.
 - [x] `cargo test --lib` → 31 passed (25 prior + 6 new).
 - [x] `pnpm check` → 0 errors, 0 warnings.
 - [x] `pnpm tauri dev` boots clean with the new icon import optimised.
+
+### Scrollback ring buffer + replay on attach
+
+Landed on top of the port feature. Keeps last ~300 lines (hard cap 512KB) of
+PTY output per app so switching focused terminals no longer loses history.
+See `docs/PLAN.md` §6 "Scrollback buffer" for the full rules.
+
+- [x] `RingBuffer` newtype in `process.rs` (300 lines / 512KB caps).
+- [x] `Inner.recent_output: HashMap<id, RingBuffer>`.
+- [x] `start_with_callback` resets the ring on every start.
+- [x] `reader_loop` pushes each chunk into the ring (tiny critical section).
+- [x] `attach` snapshots the ring and emits it as a single
+  `pty:<id>:data` event BEFORE installing the forward loop.
+- [x] `attach` works even after the process exited (replay-only path).
+- [x] `clear_ring(id)` public; called from `delete_app`.
+- [x] `TerminalPanel.svelte` registers the `listen` BEFORE `invoke('attach_pty')`
+  so the replay event is never missed (was the wrong order pre-fix).
+
+**Success criteria**
+- [x] `ring_buffer_trims_to_cap_lines` — 500 single-line pushes → exactly 300
+  newlines in snapshot.
+- [x] `ring_buffer_trims_to_cap_bytes` — 1MB push → snapshot ≤ 512KB.
+- [x] `ring_buffer_preserves_recent_bytes_with_byte_cap` — tail intact after
+  byte-cap trim.
+- [x] `ring_buffer_resets_on_restart` — second run's snapshot contains
+  `second-run`, NOT `first-run`.
+- [x] `ring_buffer_survives_process_exit` — snapshot still readable after
+  the child exits.
+- [x] `clear_ring_drops_buffer` — explicit clear empties the ring.
+- [x] `cargo test --lib` → 37 passed (31 prior + 6 new).
+- [x] `pnpm check` → 0 errors, 0 warnings.

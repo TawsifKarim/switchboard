@@ -62,17 +62,20 @@
       });
     });
 
+    // Register the data listener BEFORE attach. The Rust attach path emits
+    // the scrollback snapshot synchronously, so a listener registered after
+    // attach() returns would miss the replay event entirely.
+    unlistenData = await listen<string>(`pty:${id}:data`, (e) => {
+      if (!term) return;
+      term.write(b64ToBytes(e.payload));
+    });
+
     try {
       await invoke("attach_pty", { id });
     } catch (e) {
       term.write(`\r\n\x1b[31mattach failed: ${e}\x1b[0m\r\n`);
       return;
     }
-
-    unlistenData = await listen<string>(`pty:${id}:data`, (e) => {
-      if (!term) return;
-      term.write(b64ToBytes(e.payload));
-    });
 
     try {
       await invoke("resize_pty", { id, rows: term.rows, cols: term.cols });

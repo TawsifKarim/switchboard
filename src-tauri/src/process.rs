@@ -1,5 +1,5 @@
 use crate::config::AppEntry;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -21,6 +21,65 @@ use nix::unistd::Pid;
 
 /// Called when a child exits. The id is the app id; the i32 is the exit code.
 pub type ExitCallback = Box<dyn Fn(&str, i32) + Send + Sync + 'static>;
+
+/// Caps for the per-app scrollback ring buffer.
+/// `CAP_LINES` is the user-facing scrollback budget; `CAP_BYTES` is a hard
+/// safety cap so a single absurd line doesn't pin a megabyte per app.
+const RING_CAP_LINES: usize = 300;
+const RING_CAP_BYTES: usize = 512 * 1024;
+
+/// Per-app rolling buffer of recent PTY bytes. Trims from the front when
+/// either the line or byte budget is exceeded.
+struct RingBuffer {
+    chunks: VecDeque<Vec<u8>>,
+    line_count: usize,
+    cap_lines: usize,
+    cap_bytes: usize,
+    total_bytes: usize,
+}
+
+impl RingBuffer {
+    fn new(cap_lines: usize, cap_bytes: usize) -> Self {
+        Self {
+            chunks: VecDeque::new(),
+            line_count: 0,
+            cap_lines,
+            cap_bytes,
+            total_bytes: 0,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let added_lines = bytecount_newlines(bytes);
+        self.chunks.push_back(bytes.to_vec());
+        self.line_count += added_lines;
+        self.total_bytes += bytes.len();
+        while self.line_count > self.cap_lines || self.total_bytes > self.cap_bytes {
+            let Some(front) = self.chunks.pop_front() else {
+                break;
+            };
+            self.line_count = self
+                .line_count
+                .saturating_sub(bytecount_newlines(&front));
+            self.total_bytes = self.total_bytes.saturating_sub(front.len());
+        }
+    }
+
+    fn snapshot(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.total_bytes);
+        for c in &self.chunks {
+            out.extend_from_slice(c);
+        }
+        out
+    }
+}
+
+fn bytecount_newlines(b: &[u8]) -> usize {
+    b.iter().filter(|&&c| c == b'\n').count()
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct StatusSnapshot {
@@ -65,6 +124,10 @@ struct Inner {
     /// Background tasks forwarding PTY bytes to Tauri events. Keyed by app id.
     /// Lets attach/detach be idempotent: detach aborts the existing task.
     attachments: HashMap<String, AbortHandle>,
+    /// Recent PTY output per app id. Survives process exit so the user can
+    /// still scroll back the tail of a crashed app. Reset on each new start.
+    /// Cleared explicitly when the app entry is deleted.
+    recent_output: HashMap<String, RingBuffer>,
 }
 
 pub struct ProcessManager {
@@ -80,6 +143,7 @@ impl ProcessManager {
                 last_exit: HashMap::new(),
                 starting: std::collections::HashSet::new(),
                 attachments: HashMap::new(),
+                recent_output: HashMap::new(),
             })),
             log_dir,
         }
@@ -232,8 +296,16 @@ impl ProcessManager {
 
         // Reader task — blocking I/O on the PTY master.
         let tx_for_reader = broadcast_tx.clone();
+        let inner_for_reader = self.inner.clone();
+        let id_for_reader = id.clone();
         tokio::task::spawn_blocking(move || {
-            reader_loop(reader, log_file, tx_for_reader);
+            reader_loop(
+                reader,
+                log_file,
+                tx_for_reader,
+                inner_for_reader,
+                id_for_reader,
+            );
         });
 
         // Waiter task — blocking wait() on the child.
@@ -262,6 +334,8 @@ impl ProcessManager {
         });
 
         // Insert into the map and release the starting claim atomically.
+        // Reset the scrollback ring buffer here: a fresh run starts with an
+        // empty buffer so the user never sees stale output from a prior run.
         {
             let mut inner = self.inner.lock().unwrap();
             inner.running.insert(
@@ -278,6 +352,9 @@ impl ProcessManager {
             // A fresh run clears stale last_exit.
             inner.last_exit.remove(&id);
             inner.starting.remove(&id);
+            inner
+                .recent_output
+                .insert(id.clone(), RingBuffer::new(RING_CAP_LINES, RING_CAP_BYTES));
         }
         guard.armed = false; // already released above
 
@@ -370,11 +447,41 @@ impl ProcessManager {
     ///
     /// Idempotent: a second attach for the same id aborts the previous task
     /// before installing a new one.
+    ///
+    /// If a scrollback snapshot exists for this id (process is still running
+    /// OR has exited but never had its ring cleared), it is emitted as a
+    /// single `pty:<id>:data` event BEFORE the live forward loop starts.
+    /// This lets the UI replay recent output when the user re-focuses an app.
     pub async fn attach(&self, id: &str, app: tauri::AppHandle) -> Result<()> {
-        let rx = self
-            .subscribe(id)
-            .await
-            .ok_or_else(|| anyhow!("app {id} not running"))?;
+        // Snapshot the ring first so the replay always lands before any live
+        // chunks. Must complete before installing the forward task.
+        let snapshot = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .recent_output
+                .get(id)
+                .map(|b| b.snapshot())
+                .unwrap_or_default()
+        };
+        if !snapshot.is_empty() {
+            let engine = base64::engine::general_purpose::STANDARD;
+            let payload = engine.encode(&snapshot);
+            let _ = app.emit(&format!("pty:{id}:data"), payload);
+        }
+
+        // No live process? The replay-only path is still useful (you just
+        // viewed a crashed app's tail). Skip installing a forward loop.
+        let rx = match self.subscribe(id).await {
+            Some(rx) => rx,
+            None => {
+                // Make sure any stale attachment entry is cleared.
+                let mut inner = self.inner.lock().unwrap();
+                if let Some(h) = inner.attachments.remove(id) {
+                    h.abort();
+                }
+                return Ok(());
+            }
+        };
 
         // Abort any prior attachment for this id before installing a new one.
         if let Some(prev) = {
@@ -392,6 +499,25 @@ impl ProcessManager {
             inner.attachments.insert(id.to_string(), abort);
         }
         Ok(())
+    }
+
+    /// Remove the scrollback buffer for an app. Called when the app entry is
+    /// deleted so the ring doesn't outlive its owner.
+    pub fn clear_ring(&self, id: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.recent_output.remove(id);
+    }
+
+    /// Test/diagnostic helper: return the current ring snapshot for an id,
+    /// or an empty Vec if no buffer exists.
+    #[cfg(test)]
+    pub fn recent_snapshot(&self, id: &str) -> Vec<u8> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .recent_output
+            .get(id)
+            .map(|b| b.snapshot())
+            .unwrap_or_default()
     }
 
     /// Stop forwarding PTY bytes for this id. No-op if not attached.
@@ -569,6 +695,8 @@ fn reader_loop(
     mut reader: Box<dyn Read + Send>,
     mut log: File,
     tx: broadcast::Sender<Vec<u8>>,
+    inner: Arc<Mutex<Inner>>,
+    id: String,
 ) {
     let mut buf = [0u8; 4096];
     loop {
@@ -577,6 +705,15 @@ fn reader_loop(
             Ok(n) => {
                 let _ = log.write_all(&buf[..n]);
                 let _ = log.flush();
+                // Push into the per-app scrollback ring. Critical section is
+                // tiny: just a HashMap lookup + VecDeque ops. No .await held.
+                {
+                    if let Ok(mut g) = inner.lock() {
+                        if let Some(ring) = g.recent_output.get_mut(&id) {
+                            ring.push(&buf[..n]);
+                        }
+                    }
+                }
                 let _ = tx.send(buf[..n].to_vec());
             }
             Err(_) => break,
@@ -965,6 +1102,124 @@ mod tests {
             "expected port :{port} freed, still held by {:?}",
             still
         );
+    }
+
+    #[test]
+    fn ring_buffer_trims_to_cap_lines() {
+        let mut r = RingBuffer::new(300, 10 * 1024 * 1024);
+        for _ in 0..500 {
+            r.push(b"x\n");
+        }
+        let snap = r.snapshot();
+        let lines = snap.iter().filter(|&&c| c == b'\n').count();
+        assert_eq!(lines, 300, "expected exactly 300 newlines, got {lines}");
+    }
+
+    #[test]
+    fn ring_buffer_trims_to_cap_bytes() {
+        let mut r = RingBuffer::new(usize::MAX, 512 * 1024);
+        // One 1MB chunk with no newlines. After push, the byte cap should
+        // trim down. Note: with a single oversized chunk and no smaller
+        // predecessors, the trim loop pops the only chunk, ending at 0 bytes.
+        // That's the expected safety behavior: better empty than unbounded.
+        let big = vec![b'a'; 1024 * 1024];
+        r.push(&big);
+        let snap = r.snapshot();
+        assert!(
+            snap.len() <= 512 * 1024,
+            "snapshot len {} exceeds cap",
+            snap.len()
+        );
+    }
+
+    #[test]
+    fn ring_buffer_preserves_recent_bytes_with_byte_cap() {
+        // Push many small chunks totaling more than the byte cap; verify the
+        // tail is preserved (the newest chunk is intact).
+        let mut r = RingBuffer::new(usize::MAX, 1024);
+        for i in 0..100u8 {
+            r.push(&[i; 64]); // 100 * 64 = 6400 bytes total
+        }
+        let snap = r.snapshot();
+        assert!(snap.len() <= 1024, "snapshot len {}", snap.len());
+        // Last chunk should be all 99s.
+        assert!(
+            snap.iter().rev().take(64).all(|&b| b == 99),
+            "tail not preserved"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ring_buffer_resets_on_restart() {
+        let dir = tempdir().unwrap();
+        let pm = ProcessManager::new(dir.path().to_path_buf());
+
+        let (cb1, mut rx1) = exit_recorder();
+        pm.start_with_callback(test_entry("reset", "echo first-run"), cb1)
+            .await
+            .unwrap();
+        // Wait for the first run to fully exit so the reader drains EOF.
+        let _ = tokio::time::timeout(Duration::from_secs(5), rx1.recv()).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let snap1 = pm.recent_snapshot("reset");
+        assert!(
+            String::from_utf8_lossy(&snap1).contains("first-run"),
+            "first run not in ring: {:?}",
+            String::from_utf8_lossy(&snap1)
+        );
+
+        // Second start: ring should be reset before any second-run bytes land.
+        let (cb2, mut rx2) = exit_recorder();
+        pm.start_with_callback(test_entry("reset", "echo second-run"), cb2)
+            .await
+            .unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(5), rx2.recv()).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let snap2 = pm.recent_snapshot("reset");
+        let s2 = String::from_utf8_lossy(&snap2);
+        assert!(s2.contains("second-run"), "second run missing: {s2:?}");
+        assert!(
+            !s2.contains("first-run"),
+            "first-run leaked into ring after restart: {s2:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ring_buffer_survives_process_exit() {
+        // After the process exits, the ring must still be readable so the
+        // user can scroll back a crashed app's tail.
+        let dir = tempdir().unwrap();
+        let pm = ProcessManager::new(dir.path().to_path_buf());
+        let (cb, mut rx) = exit_recorder();
+        pm.start_with_callback(
+            test_entry("survive", "echo last-words; exit 0"),
+            cb,
+        )
+        .await
+        .unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let snap = pm.recent_snapshot("survive");
+        assert!(
+            String::from_utf8_lossy(&snap).contains("last-words"),
+            "ring lost after exit: {:?}",
+            String::from_utf8_lossy(&snap)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clear_ring_drops_buffer() {
+        let dir = tempdir().unwrap();
+        let pm = ProcessManager::new(dir.path().to_path_buf());
+        let (cb, mut rx) = exit_recorder();
+        pm.start_with_callback(test_entry("zap", "echo hi"), cb)
+            .await
+            .unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!pm.recent_snapshot("zap").is_empty());
+        pm.clear_ring("zap");
+        assert!(pm.recent_snapshot("zap").is_empty(), "ring not cleared");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

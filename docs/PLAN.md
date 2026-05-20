@@ -182,6 +182,24 @@ When `AppEntry.port` is set, the start and stop paths also sweep that port:
 `lsof` is required for the sweep; if it's absent, the sweep logs and
 no-ops rather than failing the start/stop flow.
 
+### Scrollback buffer
+
+Each app has a server-side ring buffer of recent PTY output (cap: 300 lines
+or 512KB, whichever trims first). The buffer:
+
+- **Resets on every new `start(id)`** — a fresh run starts with an empty
+  scrollback so the user never sees stale output from a prior run.
+- **Survives process exit** — you can still scroll back the tail of a
+  crashed app until you either restart it or delete the app entry.
+- **Is replayed on `attach`** — when the frontend re-focuses an app, the
+  current snapshot is emitted as a single `pty:<id>:data` event before the
+  live forward loop starts. This makes UI focus changes lossless from the
+  user's perspective.
+- Is cleared when the app entry is deleted (`delete_app` calls `clear_ring`).
+
+The frontend `TerminalPanel` registers its `listen("pty:<id>:data")` BEFORE
+calling `attach_pty`, so the replay event is never missed.
+
 ---
 
 ## 7. UI layout (Svelte + shadcn-svelte)

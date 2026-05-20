@@ -62,9 +62,16 @@ pub async fn add_app(
 }
 
 #[tauri::command]
-pub async fn delete_app(app: AppHandle, id: String) -> Result<(), String> {
+pub async fn delete_app(
+    app: AppHandle,
+    pm: tauri::State<'_, Arc<ProcessManager>>,
+    id: String,
+) -> Result<(), String> {
     let path = config::config_path(&app).map_err(|e| e.to_string())?;
-    config::delete(&path, &id).map_err(|e| e.to_string())
+    config::delete(&path, &id).map_err(|e| e.to_string())?;
+    // Drop any scrollback so the ring doesn't outlive its app entry.
+    pm.clear_ring(&id);
+    Ok(())
 }
 
 #[tauri::command]
