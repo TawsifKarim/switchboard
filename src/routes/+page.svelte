@@ -1,6 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
-  import { ScrollArea } from "$lib/components/ui/scroll-area";
+  import { onMount, flushSync } from "svelte";
   import AddAppDialog from "$lib/components/AddAppDialog.svelte";
   import AppRow from "$lib/components/AppRow.svelte";
   import TerminalPanel from "$lib/components/TerminalPanel.svelte";
@@ -10,12 +9,16 @@
 
   // svelte-dnd-action doesn't ship a `dragHandleSelector` option. To restrict
   // drag initiation to the handle, we keep dragging disabled by default and
-  // flip it on when the user presses the handle. The dnd events then reset it.
+  // flip it on when the user presses the handle. flushSync forces the reactive
+  // update through before the event bubbles to the dndzone container — without
+  // it the action still sees `true` and refuses to start.
   let dragDisabled = $state(true);
 
   function startDrag(e: Event) {
     e.preventDefault();
-    dragDisabled = false;
+    flushSync(() => {
+      dragDisabled = false;
+    });
   }
 
   function onConsider(e: CustomEvent<DndEvent<AppEntry>>) {
@@ -49,38 +52,36 @@
   </header>
 
   <div class="grid grid-cols-[minmax(320px,1fr)_2fr] overflow-hidden">
-    <aside class="border-r">
-      <ScrollArea class="h-full">
-        <div class="flex flex-col gap-2 p-3">
-          {#if !apps.loaded}
-            <p class="px-2 py-8 text-center text-sm text-muted-foreground">
-              Loading...
-            </p>
-          {:else if apps.apps.length === 0}
-            <p class="px-2 py-8 text-center text-sm text-muted-foreground">
-              No apps yet — click + Add
-            </p>
-          {:else}
-            <div
-              class="flex flex-col gap-2"
-              use:dndzone={{
-                items: apps.apps,
-                dragDisabled,
-                dropTargetStyle: {},
-                flipDurationMs: 200,
-              }}
-              onconsider={onConsider}
-              onfinalize={onFinalize}
-            >
-              {#each apps.apps as entry (entry.id)}
-                <div id={entry.id}>
-                  <AppRow {entry} {startDrag} />
-                </div>
-              {/each}
-            </div>
-          {/if}
-        </div>
-      </ScrollArea>
+    <aside class="border-r overflow-y-auto">
+      <div class="flex flex-col gap-2 p-3">
+        {#if !apps.loaded}
+          <p class="px-2 py-8 text-center text-sm text-muted-foreground">
+            Loading...
+          </p>
+        {:else if apps.apps.length === 0}
+          <p class="px-2 py-8 text-center text-sm text-muted-foreground">
+            No apps yet — click + Add
+          </p>
+        {:else}
+          <div
+            class="flex flex-col gap-2"
+            use:dndzone={{
+              items: apps.apps,
+              dragDisabled,
+              dropTargetStyle: {},
+              flipDurationMs: 200,
+            }}
+            onconsider={onConsider}
+            onfinalize={onFinalize}
+          >
+            {#each apps.apps as entry (entry.id)}
+              <div id={entry.id}>
+                <AppRow {entry} {startDrag} />
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
     </aside>
 
     <main class="min-h-0 overflow-hidden">
