@@ -9,7 +9,7 @@ import {
   type ExitEvent,
 } from "$lib/ipc";
 
-export type RuntimeStatus = "stopped" | "starting" | "running";
+export type RuntimeStatus = "stopped" | "starting" | "running" | "stopping";
 
 export type RuntimeState = {
   status: RuntimeStatus;
@@ -54,8 +54,14 @@ class AppsStore {
     return this.runtime[id] ?? DEFAULT_RUNTIME;
   }
 
-  async add(name: string, directory: string, command: string, tag: string): Promise<AppEntry> {
-    const entry = await addApp(name, directory, command, tag);
+  async add(
+    name: string,
+    directory: string,
+    command: string,
+    tag: string,
+    port: number | null = null,
+  ): Promise<AppEntry> {
+    const entry = await addApp(name, directory, command, tag, port);
     await this.refresh();
     return entry;
   }
@@ -79,12 +85,31 @@ class AppsStore {
   }
 
   async stop(id: string): Promise<void> {
-    // The exit listener handles state cleanup once the child actually exits.
-    await stopApp(id);
+    // Mark stopping so the row can show a "terminating…" spinner. The exit
+    // listener flips to 'stopped' when the child actually exits (could be up
+    // to 6s away if the process ignores SIGTERM + the port sweep needs its
+    // 1s grace).
+    this.setStopping(id);
+    try {
+      await stopApp(id);
+    } catch (e) {
+      // Surface the error but don't strand the row in 'stopping'.
+      this.setStopped(id, null);
+      throw e;
+    }
   }
 
   private setStarting(id: string): void {
     this.runtime[id] = { status: "starting", pid: null, exitCode: null };
+  }
+
+  private setStopping(id: string): void {
+    const prev = this.runtime[id];
+    this.runtime[id] = {
+      status: "stopping",
+      pid: prev?.pid ?? null,
+      exitCode: null,
+    };
   }
 
   private setRunning(id: string, pid: number): void {

@@ -15,6 +15,12 @@ pub struct AppEntry {
     pub directory: String,
     pub command: String,
     pub tag: String,
+    /// Optional port the service listens on. When set, stop/start additionally
+    /// sweeps anything bound to this port so orphaned children don't keep it
+    /// held. Additive field — pre-port `apps.json` files load fine because of
+    /// `#[serde(default)]`. Schema version stays at 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -156,6 +162,7 @@ mod tests {
             directory: "/tmp".to_string(),
             command: "echo hi".to_string(),
             tag: "#3b82f6".to_string(),
+            port: None,
         }
     }
 
@@ -243,6 +250,54 @@ mod tests {
         let after = load(&path).unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].id, "01H1");
+    }
+
+    /// Pre-port apps.json files (schema version 1, no `port` field) must
+    /// still load — the field is additive and defaults to None.
+    #[test]
+    fn load_legacy_without_port() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let legacy = serde_json::json!({
+            "version": 1,
+            "apps": [{
+                "id": "01H1",
+                "name": "legacy",
+                "directory": "/tmp",
+                "command": "echo hi",
+                "tag": "#3b82f6"
+            }]
+        });
+        fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].port, None);
+        assert_eq!(loaded[0].name, "legacy");
+    }
+
+    /// With a port set, save+load round-trips correctly and the JSON contains
+    /// the field.
+    #[test]
+    fn port_roundtrips() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let mut entry = sample("01H1");
+        entry.port = Some(8080);
+        save(&path, &[entry.clone()]).unwrap();
+        let on_disk = fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("\"port\": 8080"), "missing port in: {on_disk}");
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded[0].port, Some(8080));
+    }
+
+    /// With no port, the serialized form omits the field (skip_serializing_if).
+    #[test]
+    fn port_none_is_omitted_on_save() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        save(&path, &[sample("01H1")]).unwrap();
+        let on_disk = fs::read_to_string(&path).unwrap();
+        assert!(!on_disk.contains("\"port\""), "port should be omitted: {on_disk}");
     }
 
     #[test]

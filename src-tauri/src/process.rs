@@ -50,6 +50,9 @@ pub struct RunningApp {
     pty_writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     notify_exit: Arc<Notify>,
+    /// Cached at start time so stop() can run the post-stop port sweep
+    /// without re-reading the config.
+    port: Option<u16>,
 }
 
 struct Inner {
@@ -161,6 +164,13 @@ impl ProcessManager {
             armed: true,
         };
 
+        // Pre-flight: free the configured port. Catches stale leftovers from
+        // a previous run that didn't shut down cleanly.
+        #[cfg(unix)]
+        if let Some(p) = entry.port {
+            let _ = sweep_port(p).await;
+        }
+
         std::fs::create_dir_all(&self.log_dir)
             .with_context(|| format!("creating log dir {}", self.log_dir.display()))?;
         let log_path = self.log_dir.join(format!("{id}.log"));
@@ -262,6 +272,7 @@ impl ProcessManager {
                     pty_writer,
                     master,
                     notify_exit,
+                    port: entry.port,
                 },
             );
             // A fresh run clears stale last_exit.
@@ -274,10 +285,10 @@ impl ProcessManager {
     }
 
     pub async fn stop(&self, id: &str) -> Result<()> {
-        let (pid, notify) = {
+        let (pid, notify, port) = {
             let inner = self.inner.lock().unwrap();
             match inner.running.get(id) {
-                Some(app) => (app.pid, app.notify_exit.clone()),
+                Some(app) => (app.pid, app.notify_exit.clone(), app.port),
                 None => return Ok(()), // idempotent
             }
         };
@@ -311,6 +322,12 @@ impl ProcessManager {
         };
 
         if exited {
+            // Safety net: orphaned children sometimes outlive the pgroup walk
+            // and keep the port held. Sweep it.
+            #[cfg(unix)]
+            if let Some(p) = port {
+                let _ = sweep_port(p).await;
+            }
             return Ok(());
         }
 
@@ -318,6 +335,10 @@ impl ProcessManager {
         #[cfg(unix)]
         signal_tree(pid, Signal::SIGKILL);
         let _ = tokio::time::timeout(Duration::from_secs(1), notify.notified()).await;
+        #[cfg(unix)]
+        if let Some(p) = port {
+            let _ = sweep_port(p).await;
+        }
         Ok(())
     }
 
@@ -427,6 +448,68 @@ impl ProcessManager {
     }
 }
 
+/// Kill anything bound to `port` (TCP LISTEN or UDP). SIGTERM, then SIGKILL
+/// after a 1s grace. Idempotent and best-effort: missing tools or empty
+/// listings are not errors.
+#[cfg(unix)]
+async fn sweep_port(port: u16) -> Result<()> {
+    let initial = pids_on_port(port);
+    if initial.is_empty() {
+        return Ok(());
+    }
+    for pid in &initial {
+        eprintln!("[sweep_port] SIGTERM pid {pid} on :{port}");
+        match kill(Pid::from_raw(*pid as i32), Signal::SIGTERM) {
+            Ok(()) => {}
+            Err(nix::errno::Errno::ESRCH) => {} // already gone
+            Err(e) => eprintln!("[sweep_port] SIGTERM {pid}: {e}"),
+        }
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let survivors = pids_on_port(port);
+    for pid in &survivors {
+        eprintln!("[sweep_port] SIGKILL pid {pid} on :{port}");
+        match kill(Pid::from_raw(*pid as i32), Signal::SIGKILL) {
+            Ok(()) => {}
+            Err(nix::errno::Errno::ESRCH) => {}
+            Err(e) => eprintln!("[sweep_port] SIGKILL {pid}: {e}"),
+        }
+    }
+    Ok(())
+}
+
+/// Returns the set of PIDs currently bound to `port` (TCP listeners and UDP).
+/// Empty on missing `lsof` (logs a one-shot warning) or empty listing.
+#[cfg(unix)]
+fn pids_on_port(port: u16) -> std::collections::HashSet<u32> {
+    use std::collections::HashSet;
+    let mut out: HashSet<u32> = HashSet::new();
+    for spec in [format!("-iTCP:{port}"), format!("-iUDP:{port}")] {
+        let mut args = vec!["-nP", "-t"];
+        args.push(&spec);
+        // For TCP narrow to LISTEN; UDP has no state to filter.
+        if spec.starts_with("-iTCP") {
+            args.push("-sTCP:LISTEN");
+        }
+        match std::process::Command::new("lsof").args(&args).output() {
+            Ok(o) => {
+                if let Ok(s) = String::from_utf8(o.stdout) {
+                    for line in s.lines() {
+                        if let Ok(p) = line.trim().parse::<u32>() {
+                            out.insert(p);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[sweep_port] lsof not available ({e}); skipping port :{port} sweep");
+                return HashSet::new();
+            }
+        }
+    }
+    out
+}
+
 #[cfg(unix)]
 fn signal_tree(root: u32, sig: Signal) {
     let pids = descendants(root);
@@ -515,7 +598,37 @@ mod tests {
             directory: "/tmp".to_string(),
             command: command.to_string(),
             tag: "#000000".to_string(),
+            port: None,
         }
+    }
+
+    fn test_entry_with_port(id: &str, command: &str, port: u16) -> AppEntry {
+        let mut e = test_entry(id, command);
+        e.port = Some(port);
+        e
+    }
+
+    /// Spawn an `nc -l <port>` listener in the background and return its child.
+    /// Caller is responsible for killing it (or letting the sweep do that).
+    /// Uses macOS nc syntax (`-l <port>` listens on that port).
+    fn spawn_listener(port: u16) -> std::process::Child {
+        std::process::Command::new("nc")
+            .args(["-l", &port.to_string()])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn nc listener")
+    }
+
+    fn wait_for_listener(port: u16) -> bool {
+        for _ in 0..30 {
+            if !pids_on_port(port).is_empty() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        false
     }
 
     fn exit_recorder() -> (ExitCallback, UnboundedReceiver<(String, i32)>) {
@@ -799,6 +912,58 @@ mod tests {
         assert!(
             !inner.attachments.contains_key("decay"),
             "waiter should have cleared the attachment entry"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sweep_port_with_no_listener_is_ok() {
+        // Some random high port nothing should be on.
+        sweep_port(18901).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sweep_port_kills_listener() {
+        let port: u16 = 18765;
+        let mut nc = spawn_listener(port);
+        assert!(wait_for_listener(port), "nc never bound to :{port}");
+        sweep_port(port).await.unwrap();
+        // After the sweep, the port must be free.
+        let mut free = false;
+        for _ in 0..20 {
+            if pids_on_port(port).is_empty() {
+                free = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let _ = nc.wait();
+        assert!(free, "port :{port} still held after sweep");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn start_runs_preflight_sweep() {
+        // Pre-occupy a port with a sidecar nc; then start an entry whose port
+        // matches. The start path should sweep the sidecar before spawning,
+        // and the port must end free once the entry's quick command exits.
+        let port: u16 = 18766;
+        let mut nc = spawn_listener(port);
+        assert!(wait_for_listener(port), "sidecar nc never bound :{port}");
+        let dir = tempdir().unwrap();
+        let pm = ProcessManager::new(dir.path().to_path_buf());
+        let (cb, mut rx) = exit_recorder();
+        pm.start_with_callback(test_entry_with_port("pre", "true", port), cb)
+            .await
+            .unwrap();
+        // Wait for our command to exit.
+        let _ = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+        // Allow waiter cleanup + the post-stop sweep window (n/a here since
+        // the process exited on its own). Verify the sidecar is gone.
+        let _ = nc.wait();
+        let still = pids_on_port(port);
+        assert!(
+            still.is_empty(),
+            "expected port :{port} freed, still held by {:?}",
+            still
         );
     }
 

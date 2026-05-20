@@ -220,3 +220,36 @@ These come from `PLAN.md` §10 and §1 "Out of scope":
 - [ ] D.7 Log file rotation.
 - [ ] D.8 Remember window size/position across launches.
 - [ ] D.9 Tray icon count badge.
+
+---
+
+## Post-v1: optional port + sweep
+
+Landed after `v0.1.0`. Adds an optional `port` field per app; on start and
+stop, anything bound to that port is killed (SIGTERM → 1s → SIGKILL). Also
+adds a "terminating…" loader on the row during the stop window.
+
+- [x] Schema: `AppEntry.port: Option<u16>` (additive; schema version stays 1).
+- [x] `sweep_port(port)` helper in `process.rs` — unix-gated, uses `lsof`,
+  best-effort if `lsof` is missing.
+- [x] `start` runs pre-flight sweep when port is set.
+- [x] `stop` runs post-stop sweep when port is set.
+- [x] `add_app` command takes `port: Option<u16>`; rejects port `0`.
+- [x] `ipc.ts` `AppEntry.port` + `addApp(..., port)` (defaults to null).
+- [x] Store: `RuntimeStatus` gains `'stopping'`; `stop()` sets it; exit
+  listener flips to `'stopped'`.
+- [x] Add modal: port input (number 1–65535, optional) with helper copy.
+- [x] Row: shows `:PORT` when set; shows `Loader2` spinner +
+  "terminating…" while stopping; switch disabled during stopping.
+
+**Success criteria**
+- [x] Pre-port `apps.json` files load fine — test `load_legacy_without_port`.
+- [x] `port` round-trips through save/load — test `port_roundtrips`.
+- [x] `port: None` is omitted on disk — test `port_none_is_omitted_on_save`.
+- [x] Sweep with no listener is `Ok(())` — test `sweep_port_with_no_listener_is_ok`.
+- [x] Sweep kills a real `nc` listener — test `sweep_port_kills_listener`.
+- [x] Pre-flight sweep clears a sidecar before start — test
+  `start_runs_preflight_sweep`.
+- [x] `cargo test --lib` → 31 passed (25 prior + 6 new).
+- [x] `pnpm check` → 0 errors, 0 warnings.
+- [x] `pnpm tauri dev` boots clean with the new icon import optimised.

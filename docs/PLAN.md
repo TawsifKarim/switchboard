@@ -103,11 +103,15 @@ Logs always live in `<config-dir>/logs/<app-id>.log`.
       "name": "auth-service",     // display name, unique
       "directory": "/Users/me/Projects/auth",
       "command": "air",           // raw command string, runs under zsh -ic
-      "tag": "#3b82f6"            // hex color for the row dot/badge
+      "tag": "#3b82f6",           // hex color for the row dot/badge
+      "port": 8080                // optional; see §6 for sweep semantics
     }
   ]
 }
 ```
+
+`port` is optional and additive — pre-port `apps.json` files load fine
+(schema version stays `1`). When omitted, the field is not serialized.
 
 Runtime state (PID, status, last exit code) is **not** persisted — it is
 in-memory in the Rust backend and re-derived on each launch (everything starts
@@ -162,6 +166,21 @@ Module: `src-tauri/src/process.rs`.
      `go run` children also die).
   2. Wait up to 5s for the waiter task to observe exit.
   3. If still alive, `killpg(pid, SIGKILL)`.
+
+### Optional port sweep
+
+When `AppEntry.port` is set, the start and stop paths also sweep that port:
+
+- **Pre-flight (in `start`)**: before opening the PTY, find anything bound to
+  the port (`lsof -nP -iTCP:<port> -sTCP:LISTEN -t` + UDP), SIGTERM, wait 1s,
+  SIGKILL any survivors. Clears stale leftovers from a previous run that
+  didn't shut down cleanly.
+- **Post-stop (in `stop`)**: after the SIGTERM/SIGKILL path finishes, re-run
+  the same sweep. Safety net for orphaned children the process-group walk
+  missed but that are still holding the port.
+
+`lsof` is required for the sweep; if it's absent, the sweep logs and
+no-ops rather than failing the start/stop flow.
 
 ---
 

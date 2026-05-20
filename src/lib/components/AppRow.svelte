@@ -4,6 +4,7 @@
   import * as AlertDialog from "$lib/components/ui/alert-dialog";
   import Eye from "@lucide/svelte/icons/eye";
   import Trash2 from "@lucide/svelte/icons/trash-2";
+  import Loader2 from "@lucide/svelte/icons/loader-2";
   import { apps } from "$lib/stores/apps.svelte";
   import type { AppEntry } from "$lib/ipc";
 
@@ -14,6 +15,7 @@
 
   const rt = $derived(apps.runtimeOf(entry.id));
   const isRunning = $derived(rt.status === "running");
+  const isStopping = $derived(rt.status === "stopping");
   const isFocused = $derived(apps.focusedId === entry.id);
   const crashed = $derived(
     rt.status === "stopped" && rt.exitCode != null && rt.exitCode !== 0,
@@ -21,6 +23,7 @@
   const statusLabel = $derived.by(() => {
     if (rt.status === "running") return `PID ${rt.pid}`;
     if (rt.status === "starting") return "…";
+    if (rt.status === "stopping") return "terminating…";
     if (crashed) return `exit ${rt.exitCode}`;
     return "stopped";
   });
@@ -58,15 +61,21 @@
   <div class="min-w-0 flex-1">
     <div class="truncate text-sm font-medium">{entry.name}</div>
     <div
-      class="truncate text-xs {crashed ? 'text-destructive' : 'text-muted-foreground'}"
+      class="flex items-center gap-1.5 truncate text-xs {crashed ? 'text-destructive' : 'text-muted-foreground'}"
     >
-      {statusLabel}
+      {#if isStopping}
+        <Loader2 class="size-3 animate-spin" />
+      {/if}
+      <span class="truncate">{statusLabel}</span>
+      {#if entry.port != null}
+        <span class="text-muted-foreground/80">:{entry.port}</span>
+      {/if}
     </div>
   </div>
   <Switch
     checked={isRunning}
     onCheckedChange={onToggle}
-    disabled={rt.status === "starting"}
+    disabled={rt.status === "starting" || isStopping}
     aria-label="Toggle {entry.name}"
   />
   <Button

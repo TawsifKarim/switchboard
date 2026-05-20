@@ -22,6 +22,7 @@ pub async fn add_app(
     directory: String,
     command: String,
     tag: String,
+    port: Option<u16>,
 ) -> Result<AppEntry, String> {
     let name = name.trim().to_string();
     let directory = directory.trim().to_string();
@@ -40,6 +41,9 @@ pub async fn add_app(
     if !Path::new(&directory).is_dir() {
         return Err(format!("directory does not exist: {directory}"));
     }
+    if let Some(0) = port {
+        return Err("port must be between 1 and 65535".into());
+    }
 
     let tag = if tag.is_empty() { DEFAULT_TAG.to_string() } else { tag.to_string() };
 
@@ -49,6 +53,7 @@ pub async fn add_app(
         directory,
         command,
         tag,
+        port,
     };
 
     let path = config::config_path(&app).map_err(|e| e.to_string())?;

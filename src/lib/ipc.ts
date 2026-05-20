@@ -6,6 +6,7 @@ export type AppEntry = {
   directory: string;
   command: string;
   tag: string;
+  port?: number | null;
 };
 
 export const listApps = () => invoke<AppEntry[]>("list_apps");
@@ -15,7 +16,8 @@ export const addApp = (
   directory: string,
   command: string,
   tag: string,
-) => invoke<AppEntry>("add_app", { name, directory, command, tag });
+  port: number | null = null,
+) => invoke<AppEntry>("add_app", { name, directory, command, tag, port });
 
 export const deleteApp = (id: string) => invoke<void>("delete_app", { id });
 
