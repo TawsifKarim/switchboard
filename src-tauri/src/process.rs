@@ -181,7 +181,10 @@ impl ProcessManager {
             inner.sampler_started = true;
         }
         let inner = self.inner.clone();
-        tokio::spawn(async move {
+        // Use Tauri's async runtime — at setup time there is no enclosing
+        // Tokio runtime context, so `tokio::spawn` panics with "no reactor
+        // running". Tauri's runtime is alive by the time setup fires.
+        tauri::async_runtime::spawn(async move {
             // Owned System so refreshes between ticks measure CPU as a delta.
             let mut sys = System::new();
             // Prime once so the first emitted CPU value is meaningful.
