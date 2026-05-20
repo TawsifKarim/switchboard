@@ -30,14 +30,7 @@
     if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
     return `${bytes} B`;
   }
-  const statusLabel = $derived.by(() => {
-    if (rt.status === "running") {
-      const base = `PID ${rt.pid}`;
-      if (stats) {
-        return `${base} · ${Math.round(stats.cpu_pct)}% · ${formatRss(stats.rss_bytes)}`;
-      }
-      return base;
-    }
+  const fallbackLabel = $derived.by(() => {
     if (rt.status === "starting") return "…";
     if (rt.status === "stopping") return "terminating…";
     if (crashed) return `exit ${rt.exitCode}`;
@@ -92,9 +85,38 @@
       {#if isStopping}
         <Loader2 class="size-3 animate-spin" />
       {/if}
-      <span class="truncate">{statusLabel}</span>
-      {#if entry.port != null}
-        <span class="text-muted-foreground/80">:{entry.port}</span>
+      {#if isRunning}
+        <span class="flex items-center gap-3 tabular-nums">
+          <span>
+            <span class="opacity-60">PID:</span>
+            <span class="inline-block min-w-[6ch]">{rt.pid}</span>
+          </span>
+          {#if entry.port != null}
+            <span>
+              <span class="opacity-60">PORT:</span>
+              <span class="inline-block min-w-[5ch]">{entry.port}</span>
+            </span>
+          {/if}
+          {#if stats}
+            <span>
+              <span class="opacity-60">CPU:</span>
+              <span class="inline-block min-w-[4ch] text-right"
+                >{Math.round(stats.cpu_pct)}%</span
+              >
+            </span>
+            <span>
+              <span class="opacity-60">RAM:</span>
+              <span class="inline-block min-w-[7ch] text-right"
+                >{formatRss(stats.rss_bytes)}</span
+              >
+            </span>
+          {/if}
+        </span>
+      {:else}
+        <span class="truncate">{fallbackLabel}</span>
+        {#if entry.port != null}
+          <span class="text-muted-foreground/80">:{entry.port}</span>
+        {/if}
       {/if}
     </div>
   </div>
