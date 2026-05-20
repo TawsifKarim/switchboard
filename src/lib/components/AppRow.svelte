@@ -5,10 +5,14 @@
   import Eye from "@lucide/svelte/icons/eye";
   import Trash2 from "@lucide/svelte/icons/trash-2";
   import Loader2 from "@lucide/svelte/icons/loader-2";
+  import GripVertical from "@lucide/svelte/icons/grip-vertical";
   import { apps } from "$lib/stores/apps.svelte";
   import type { AppEntry } from "$lib/ipc";
 
-  let { entry }: { entry: AppEntry } = $props();
+  let {
+    entry,
+    startDrag,
+  }: { entry: AppEntry; startDrag?: (e: Event) => void } = $props();
 
   let confirmOpen = $state(false);
   let deleting = $state(false);
@@ -53,6 +57,16 @@
     ? 'bg-accent'
     : 'bg-card'}"
 >
+  <span
+    role="button"
+    tabindex="-1"
+    aria-label="Drag to reorder"
+    class="flex shrink-0 cursor-grab text-muted-foreground/60 select-none hover:text-muted-foreground active:cursor-grabbing"
+    onpointerdown={startDrag}
+    ontouchstart={startDrag}
+  >
+    <GripVertical class="size-4" />
+  </span>
   <span
     class="size-2.5 shrink-0 rounded-full {crashed ? 'bg-destructive' : ''}"
     style={crashed ? "" : `background-color: ${entry.tag}`}

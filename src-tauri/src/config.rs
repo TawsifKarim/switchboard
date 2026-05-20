@@ -150,6 +150,36 @@ pub fn delete(path: &Path, id: &str) -> Result<()> {
     save(path, &apps)
 }
 
+/// Reorder `apps` to match `ordered_ids`. Defensive: rejects on length
+/// mismatch, missing ids, or duplicate ids in the requested order. This
+/// surfaces sync bugs between the UI's view of the list and what's on disk
+/// rather than silently dropping entries.
+pub fn reorder(apps: Vec<AppEntry>, ordered_ids: &[String]) -> Result<Vec<AppEntry>> {
+    if apps.len() != ordered_ids.len() {
+        return Err(anyhow::anyhow!(
+            "reorder length mismatch: have {} apps, got {} ids",
+            apps.len(),
+            ordered_ids.len()
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for id in ordered_ids {
+        if !seen.insert(id) {
+            return Err(anyhow::anyhow!("duplicate id in reorder list: {}", id));
+        }
+    }
+    let mut by_id: std::collections::HashMap<String, AppEntry> =
+        apps.into_iter().map(|a| (a.id.clone(), a)).collect();
+    let mut out = Vec::with_capacity(ordered_ids.len());
+    for id in ordered_ids {
+        let entry = by_id
+            .remove(id)
+            .ok_or_else(|| anyhow::anyhow!("reorder id not found in apps: {}", id))?;
+        out.push(entry);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +328,36 @@ mod tests {
         save(&path, &[sample("01H1")]).unwrap();
         let on_disk = fs::read_to_string(&path).unwrap();
         assert!(!on_disk.contains("\"port\""), "port should be omitted: {on_disk}");
+    }
+
+    #[test]
+    fn reorder_changes_order() {
+        let apps = vec![sample("A"), sample("B"), sample("C")];
+        let new_order = vec!["C".into(), "A".into(), "B".into()];
+        let out = reorder(apps, &new_order).unwrap();
+        assert_eq!(out.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+                   vec!["C", "A", "B"]);
+    }
+
+    #[test]
+    fn reorder_rejects_missing_id() {
+        let apps = vec![sample("A"), sample("B")];
+        let err = reorder(apps, &["A".into(), "Z".into()]).unwrap_err().to_string();
+        assert!(err.contains("not found"), "got: {err}");
+    }
+
+    #[test]
+    fn reorder_rejects_duplicate_id() {
+        let apps = vec![sample("A"), sample("B")];
+        let err = reorder(apps, &["A".into(), "A".into()]).unwrap_err().to_string();
+        assert!(err.contains("duplicate"), "got: {err}");
+    }
+
+    #[test]
+    fn reorder_rejects_length_mismatch() {
+        let apps = vec![sample("A"), sample("B"), sample("C")];
+        let err = reorder(apps, &["A".into(), "B".into()]).unwrap_err().to_string();
+        assert!(err.contains("length mismatch"), "got: {err}");
     }
 
     #[test]

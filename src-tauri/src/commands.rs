@@ -68,9 +68,22 @@ pub async fn delete_app(
     id: String,
 ) -> Result<(), String> {
     let path = config::config_path(&app).map_err(|e| e.to_string())?;
+    // Stop the process first so we don't orphan it when the entry is gone.
+    pm.stop(&id).await.map_err(|e| e.to_string())?;
     config::delete(&path, &id).map_err(|e| e.to_string())?;
-    // Drop any scrollback so the ring doesn't outlive its app entry.
     pm.clear_ring(&id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn reorder_apps(
+    app: AppHandle,
+    ordered_ids: Vec<String>,
+) -> Result<(), String> {
+    let path = config::config_path(&app).map_err(|e| e.to_string())?;
+    let apps = config::load(&path).map_err(|e| e.to_string())?;
+    let new_apps = config::reorder(apps, &ordered_ids).map_err(|e| e.to_string())?;
+    config::save(&path, &new_apps).map_err(|e| e.to_string())?;
     Ok(())
 }
 

@@ -21,6 +21,9 @@ export const addApp = (
 
 export const deleteApp = (id: string) => invoke<void>("delete_app", { id });
 
+export const reorderApps = (orderedIds: string[]) =>
+  invoke<void>("reorder_apps", { orderedIds });
+
 export type StatusSnapshot = {
   running: boolean;
   pid: number | null;

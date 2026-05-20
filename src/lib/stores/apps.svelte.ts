@@ -3,6 +3,7 @@ import {
   addApp,
   deleteApp,
   listApps,
+  reorderApps,
   startApp,
   stopApp,
   type AppEntry,
@@ -64,6 +65,28 @@ class AppsStore {
     const entry = await addApp(name, directory, command, tag, port);
     await this.refresh();
     return entry;
+  }
+
+  /** Live order update from dnd `consider` events — no backend call. */
+  setOrder(items: AppEntry[]): void {
+    this.apps = items;
+  }
+
+  /** Commit the new order to disk. On error, revert by re-fetching. */
+  async reorder(orderedIds: string[]): Promise<void> {
+    const byId = new Map(this.apps.map((a) => [a.id, a]));
+    const next: AppEntry[] = [];
+    for (const id of orderedIds) {
+      const a = byId.get(id);
+      if (a) next.push(a);
+    }
+    if (next.length === this.apps.length) this.apps = next;
+    try {
+      await reorderApps(orderedIds);
+    } catch (e) {
+      console.error("reorder failed; reverting", e);
+      await this.refresh();
+    }
   }
 
   async remove(id: string): Promise<void> {

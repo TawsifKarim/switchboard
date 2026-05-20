@@ -82,6 +82,7 @@ pub fn run() {
             commands::list_apps,
             commands::add_app,
             commands::delete_app,
+            commands::reorder_apps,
             commands::start_app,
             commands::stop_app,
             commands::get_status,
