@@ -24,8 +24,20 @@
   const crashed = $derived(
     rt.status === "stopped" && rt.exitCode != null && rt.exitCode !== 0,
   );
+  const stats = $derived(apps.stats[entry.id]);
+  function formatRss(bytes: number): string {
+    if (bytes >= 1024 * 1024) return `${Math.round(bytes / (1024 * 1024))} MB`;
+    if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+    return `${bytes} B`;
+  }
   const statusLabel = $derived.by(() => {
-    if (rt.status === "running") return `PID ${rt.pid}`;
+    if (rt.status === "running") {
+      const base = `PID ${rt.pid}`;
+      if (stats) {
+        return `${base} · ${Math.round(stats.cpu_pct)}% · ${formatRss(stats.rss_bytes)}`;
+      }
+      return base;
+    }
     if (rt.status === "starting") return "…";
     if (rt.status === "stopping") return "terminating…";
     if (crashed) return `exit ${rt.exitCode}`;

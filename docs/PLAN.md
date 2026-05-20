@@ -142,6 +142,8 @@ Events emitted to the frontend (Tauri event bus):
 - `pty:<id>:data` — raw PTY bytes (binary or base64) for xterm.js
 - `app:<id>:exit` — `{ code: i32 }` when process exits
 - `app:<id>:status` — coarse status changes (`starting | running | stopped`)
+- `app-stats` — `{ id, cpu_pct, rss_bytes }` emitted every 2s while running
+  (tree-aggregated across the root pid + all descendants)
 
 ---
 

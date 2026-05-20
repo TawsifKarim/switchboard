@@ -1,5 +1,5 @@
 use crate::config::AppEntry;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -10,6 +10,7 @@ use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
+use sysinfo::{Pid as SysPid, ProcessesToUpdate, System};
 use tauri::Emitter;
 use tokio::sync::{broadcast, Notify};
 use tokio::task::AbortHandle;
@@ -103,6 +104,21 @@ pub struct StartedPayload {
     pub pid: u32,
 }
 
+/// Payload for the global `app-stats` event. Emitted every ~2s per running app.
+/// `cpu_pct` is summed across the root pid and all descendants; on a multi-core
+/// machine a single CPU-pegged process can briefly read above 100%.
+#[derive(Clone, Debug, Serialize)]
+pub struct StatsPayload {
+    pub id: String,
+    pub cpu_pct: f32,
+    pub rss_bytes: u64,
+}
+
+/// Sampling cadence for CPU + RAM. 2s is a comfortable balance — `sysinfo`
+/// reports CPU as a delta since the previous refresh, so sub-second sampling
+/// makes numbers noisy.
+const STATS_INTERVAL: Duration = Duration::from_secs(2);
+
 pub struct RunningApp {
     pub pid: u32,
     pub broadcast_tx: broadcast::Sender<Vec<u8>>,
@@ -128,6 +144,9 @@ struct Inner {
     /// still scroll back the tail of a crashed app. Reset on each new start.
     /// Cleared explicitly when the app entry is deleted.
     recent_output: HashMap<String, RingBuffer>,
+    /// Set to true once `start_stats_sampler` has spawned its background task.
+    /// Prevents double-spawn if setup somehow runs more than once.
+    sampler_started: bool,
 }
 
 pub struct ProcessManager {
@@ -144,9 +163,73 @@ impl ProcessManager {
                 starting: std::collections::HashSet::new(),
                 attachments: HashMap::new(),
                 recent_output: HashMap::new(),
+                sampler_started: false,
             })),
             log_dir,
         }
+    }
+
+    /// Spawn the background task that samples CPU + RAM for every running app
+    /// every 2s and emits `app-stats` events. Idempotent — safe to call more
+    /// than once.
+    pub fn start_stats_sampler(&self, app: tauri::AppHandle) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.sampler_started {
+                return;
+            }
+            inner.sampler_started = true;
+        }
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            // Owned System so refreshes between ticks measure CPU as a delta.
+            let mut sys = System::new();
+            // Prime once so the first emitted CPU value is meaningful.
+            sys.refresh_processes(ProcessesToUpdate::All, true);
+            let mut tick = tokio::time::interval(STATS_INTERVAL);
+            // Avoid burst-firing if the runtime falls behind.
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let snapshot: Vec<(String, u32)> = {
+                    let g = inner.lock().unwrap();
+                    g.running
+                        .iter()
+                        .map(|(id, app)| (id.clone(), app.pid))
+                        .collect()
+                };
+                if snapshot.is_empty() {
+                    continue;
+                }
+                sys.refresh_processes(ProcessesToUpdate::All, true);
+                // Build parent → children index once per tick. O(N) total.
+                let mut by_parent: HashMap<SysPid, Vec<SysPid>> = HashMap::new();
+                for (pid, proc_) in sys.processes() {
+                    if let Some(parent) = proc_.parent() {
+                        by_parent.entry(parent).or_default().push(*pid);
+                    }
+                }
+                for (id, root) in snapshot {
+                    let tree = descendants_set(SysPid::from_u32(root), &by_parent);
+                    let mut cpu: f32 = 0.0;
+                    let mut rss: u64 = 0;
+                    for p in &tree {
+                        if let Some(proc_) = sys.process(*p) {
+                            cpu += proc_.cpu_usage();
+                            rss += proc_.memory();
+                        }
+                    }
+                    let _ = app.emit(
+                        "app-stats",
+                        StatsPayload {
+                            id,
+                            cpu_pct: cpu,
+                            rss_bytes: rss,
+                        },
+                    );
+                }
+            }
+        });
     }
 
     /// Number of currently-running apps. Used by the tray to update the
@@ -630,6 +713,28 @@ fn pids_on_port(port: u16) -> std::collections::HashSet<u32> {
             Err(e) => {
                 eprintln!("[sweep_port] lsof not available ({e}); skipping port :{port} sweep");
                 return HashSet::new();
+            }
+        }
+    }
+    out
+}
+
+/// Collect `root` and all transitive descendants reachable through the
+/// `by_parent` map. Pure function so the stats sampler logic is testable
+/// without spawning real processes.
+fn descendants_set(
+    root: SysPid,
+    by_parent: &HashMap<SysPid, Vec<SysPid>>,
+) -> HashSet<SysPid> {
+    let mut out: HashSet<SysPid> = HashSet::new();
+    out.insert(root);
+    let mut frontier: Vec<SysPid> = vec![root];
+    while let Some(p) = frontier.pop() {
+        if let Some(kids) = by_parent.get(&p) {
+            for k in kids {
+                if out.insert(*k) {
+                    frontier.push(*k);
+                }
             }
         }
     }
@@ -1220,6 +1325,51 @@ mod tests {
         assert!(!pm.recent_snapshot("zap").is_empty());
         pm.clear_ring("zap");
         assert!(pm.recent_snapshot("zap").is_empty(), "ring not cleared");
+    }
+
+    #[test]
+    fn descendants_set_collects_full_tree() {
+        // Shape:
+        //   1
+        //   ├── 2
+        //   │   └── 4
+        //   │       └── 5
+        //   └── 3
+        //   100  (unrelated)
+        let mut by_parent: HashMap<SysPid, Vec<SysPid>> = HashMap::new();
+        by_parent.insert(SysPid::from_u32(1), vec![SysPid::from_u32(2), SysPid::from_u32(3)]);
+        by_parent.insert(SysPid::from_u32(2), vec![SysPid::from_u32(4)]);
+        by_parent.insert(SysPid::from_u32(4), vec![SysPid::from_u32(5)]);
+        // pid 100 has its own subtree that must not be included
+        by_parent.insert(SysPid::from_u32(99), vec![SysPid::from_u32(100)]);
+
+        let tree = descendants_set(SysPid::from_u32(1), &by_parent);
+        let expected: HashSet<SysPid> = [1u32, 2, 3, 4, 5]
+            .into_iter()
+            .map(SysPid::from_u32)
+            .collect();
+        assert_eq!(tree, expected);
+    }
+
+    #[test]
+    fn descendants_set_handles_leaf_with_no_children() {
+        let by_parent: HashMap<SysPid, Vec<SysPid>> = HashMap::new();
+        let tree = descendants_set(SysPid::from_u32(42), &by_parent);
+        assert_eq!(tree.len(), 1);
+        assert!(tree.contains(&SysPid::from_u32(42)));
+    }
+
+    #[test]
+    fn descendants_set_is_cycle_safe() {
+        // Defensive: real /proc-ish data shouldn't contain cycles, but we
+        // rely on the HashSet insert guard rather than trusting the source.
+        let mut by_parent: HashMap<SysPid, Vec<SysPid>> = HashMap::new();
+        by_parent.insert(SysPid::from_u32(1), vec![SysPid::from_u32(2)]);
+        by_parent.insert(SysPid::from_u32(2), vec![SysPid::from_u32(1)]); // cycle
+        let tree = descendants_set(SysPid::from_u32(1), &by_parent);
+        let expected: HashSet<SysPid> =
+            [1u32, 2].into_iter().map(SysPid::from_u32).collect();
+        assert_eq!(tree, expected);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

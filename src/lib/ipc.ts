@@ -36,3 +36,5 @@ export const getStatus = (id: string) =>
   invoke<StatusSnapshot>("get_status", { id });
 
 export type ExitEvent = { id: string; code: number };
+
+export type AppStats = { id: string; cpu_pct: number; rss_bytes: number };

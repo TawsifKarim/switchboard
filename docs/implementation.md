@@ -284,3 +284,37 @@ See `docs/PLAN.md` §6 "Scrollback buffer" for the full rules.
 - [x] `clear_ring_drops_buffer` — explicit clear empties the ring.
 - [x] `cargo test --lib` → 37 passed (31 prior + 6 new).
 - [x] `pnpm check` → 0 errors, 0 warnings.
+
+### CPU + RAM stats per row
+
+Background 2-second sampler emits `app-stats` per running app, summed across
+the root pid and all transitive descendants (so `air → go run → built binary`
+rolls up into one number). Rendered on each row alongside the PID.
+
+- [x] `sysinfo = "0.39"` (default-features = false, `features = ["system"]`)
+  in `src-tauri/Cargo.toml`.
+- [x] `StatsPayload { id, cpu_pct, rss_bytes }` in `process.rs`.
+- [x] `ProcessManager::start_stats_sampler(app)` — spawns a single
+  `tokio::time::interval(2s)` task; idempotent via `Inner.sampler_started`.
+- [x] `lib.rs::setup` calls `pm.start_stats_sampler(app.handle().clone())`.
+- [x] Pure helper `descendants_set(root, by_parent)` — walks a parent→children
+  index built once per tick (O(N) per tick).
+- [x] `apps.svelte.ts` adds `stats` map + `app-stats` listener; clears stat
+  on `app-exit` and on `remove`.
+- [x] `AppRow.svelte` renders `PID N · CPU% · MB` when running and `stats`
+  has landed; falls back to plain `PID N` for the ~2s between start and
+  first tick.
+
+**Success criteria**
+- [x] `descendants_set_collects_full_tree` — fixture with branches and an
+  unrelated sibling subtree.
+- [x] `descendants_set_handles_leaf_with_no_children` — leaf returns `{root}`.
+- [x] `descendants_set_is_cycle_safe` — HashSet insert breaks pathological
+  parent→child→parent cycles.
+- [x] `cargo test --lib` → 44 passed (41 prior + 3 new).
+- [x] `pnpm check` → 0 errors, 0 warnings.
+
+**Manual smoke (for the user)**
+- CPU-burner: `bash -c 'while :; do :; done'` in `/tmp` → row should show
+  `PID N · ~100% · ~3 MB` within 2–4s.
+- Idler: `sleep 30` → ~0% CPU, very small RSS.

@@ -7,6 +7,7 @@ import {
   startApp,
   stopApp,
   type AppEntry,
+  type AppStats,
   type ExitEvent,
 } from "$lib/ipc";
 
@@ -27,10 +28,12 @@ const DEFAULT_RUNTIME: RuntimeState = {
 class AppsStore {
   apps = $state<AppEntry[]>([]);
   runtime = $state<Record<string, RuntimeState>>({});
+  stats = $state<Record<string, AppStats>>({});
   loaded = $state(false);
   focusedId = $state<string | null>(null);
 
   private unlisten: UnlistenFn | null = null;
+  private unlistenStats: UnlistenFn | null = null;
   private initialized = false;
 
   focus(id: string | null): void {
@@ -43,6 +46,11 @@ class AppsStore {
     await this.refresh();
     this.unlisten = await listen<ExitEvent>("app-exit", (e) => {
       this.setStopped(e.payload.id, e.payload.code);
+      // The process is gone; don't leave stale CPU/RAM next to the PID.
+      delete this.stats[e.payload.id];
+    });
+    this.unlistenStats = await listen<AppStats>("app-stats", (e) => {
+      this.stats[e.payload.id] = e.payload;
     });
   }
 
@@ -92,6 +100,7 @@ class AppsStore {
   async remove(id: string): Promise<void> {
     await deleteApp(id);
     delete this.runtime[id];
+    delete this.stats[id];
     if (this.focusedId === id) this.focusedId = null;
     await this.refresh();
   }

@@ -46,6 +46,10 @@ pub fn run() {
             let pm = Arc::new(ProcessManager::new(log_dir));
             app.manage(pm.clone());
 
+            // Background 2s sampler emits `app-stats` per running app so the
+            // UI can render CPU/RAM next to the PID without polling.
+            pm.start_stats_sampler(app.handle().clone());
+
             // Tray icon + menu. Built programmatically so we can mutate the
             // "Running: N" label without going through tauri.conf.json.
             tray::build(&app.handle())?;
