@@ -116,9 +116,9 @@
         <Label for="app-port">Port <span class="text-muted-foreground">(optional)</span></Label>
         <Input
           id="app-port"
-          type="number"
-          min="1"
-          max="65535"
+          type="text"
+          inputmode="numeric"
+          pattern="[0-9]*"
           bind:value={portStr}
           placeholder="8080"
         />

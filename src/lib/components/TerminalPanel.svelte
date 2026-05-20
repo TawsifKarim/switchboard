@@ -12,6 +12,7 @@
   let term: Terminal | undefined;
   let fit: FitAddon | undefined;
   let unlistenData: UnlistenFn | null = null;
+  let unlistenStarted: UnlistenFn | null = null;
   let onDataDisposer: { dispose: () => void } | null = null;
   let resizeObserver: ResizeObserver | null = null;
   let resizeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -83,6 +84,22 @@
       // ignore
     }
 
+    // Re-attach when the same app is restarted while this panel is focused.
+    // Without this, the new RunningApp's broadcast is never wired up here.
+    unlistenStarted = await listen<{ id: string; pid: number }>(
+      "app-started",
+      async (e) => {
+        if (disposed || !term || e.payload.id !== id) return;
+        term.clear();
+        try {
+          await invoke("attach_pty", { id });
+          await invoke("resize_pty", { id, rows: term.rows, cols: term.cols });
+        } catch {
+          // ignore; the user may have toggled off again
+        }
+      },
+    );
+
     resizeObserver = new ResizeObserver(scheduleResize);
     resizeObserver.observe(containerEl);
     window.addEventListener("resize", scheduleResize);
@@ -98,6 +115,8 @@
     onDataDisposer = null;
     unlistenData?.();
     unlistenData = null;
+    unlistenStarted?.();
+    unlistenStarted = null;
     invoke("detach_pty", { id }).catch(() => {
       // App may have exited already; harmless.
     });
