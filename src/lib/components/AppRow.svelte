@@ -162,19 +162,15 @@
   >
     <Eye class="size-4" />
   </Button>
+  <Button
+    variant="ghost"
+    size="icon"
+    aria-label="Delete {entry.name}"
+    onclick={() => (confirmOpen = true)}
+  >
+    <Trash2 class="size-4" />
+  </Button>
   <AlertDialog.Root bind:open={confirmOpen}>
-    <AlertDialog.Trigger>
-      {#snippet child({ props })}
-        <Button
-          {...props}
-          variant="ghost"
-          size="icon"
-          aria-label="Delete {entry.name}"
-        >
-          <Trash2 class="size-4" />
-        </Button>
-      {/snippet}
-    </AlertDialog.Trigger>
     <AlertDialog.Content>
       <AlertDialog.Header>
         <AlertDialog.Title>Delete "{entry.name}"?</AlertDialog.Title>

@@ -48,3 +48,9 @@ export type AppStats = { id: string; cpu_pct: number; rss_bytes: number };
 
 export const getBranch = (directory: string) =>
   invoke<string | null>("get_branch", { directory });
+
+export const openShell = (directory: string) =>
+  invoke<string>("open_shell", { directory });
+
+export const closeShell = (id: string) =>
+  invoke<void>("close_shell", { id });

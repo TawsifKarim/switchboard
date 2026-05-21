@@ -14,6 +14,12 @@ use sysinfo::{Pid as SysPid, ProcessesToUpdate, System};
 use tauri::Emitter;
 use tokio::sync::{broadcast, Notify};
 use tokio::task::AbortHandle;
+use ulid::Ulid;
+
+/// Prefix used for one-off shell sessions opened from the terminal drawer.
+/// Lets the tray running count and the stats sampler skip them so transient
+/// shells aren't reported as user apps.
+const SHELL_ID_PREFIX: &str = "oneoff:";
 
 #[cfg(unix)]
 use nix::sys::signal::{kill, killpg, Signal};
@@ -198,6 +204,7 @@ impl ProcessManager {
                     let g = inner.lock().unwrap();
                     g.running
                         .iter()
+                        .filter(|(id, _)| !id.starts_with(SHELL_ID_PREFIX))
                         .map(|(id, app)| (id.clone(), app.pid))
                         .collect()
                 };
@@ -235,10 +242,16 @@ impl ProcessManager {
         });
     }
 
-    /// Number of currently-running apps. Used by the tray to update the
-    /// "Running: N" label.
+    /// Number of currently-running user apps. Used by the tray to update the
+    /// "Running: N" label. Excludes transient one-off shell sessions.
     pub fn running_count(&self) -> usize {
-        self.inner.lock().unwrap().running.len()
+        self.inner
+            .lock()
+            .unwrap()
+            .running
+            .keys()
+            .filter(|id| !id.starts_with(SHELL_ID_PREFIX))
+            .count()
     }
 
     /// Production entry point: emit a Tauri event on exit.
@@ -280,13 +293,91 @@ impl ProcessManager {
         entry: AppEntry,
         on_exit: ExitCallback,
     ) -> Result<u32> {
-        let id = entry.id.clone();
+        // Inherit env first so PATH/HOME/asdf shims/etc. resolve the same as
+        // running the command by hand.
+        let mut cmd = CommandBuilder::new("zsh");
+        for (k, v) in std::env::vars_os() {
+            cmd.env(k, v);
+        }
+        // Pass the user's command via an env var to avoid shell-quoting issues.
+        cmd.env("SWITCHBOARD_USER_CMD", &entry.command);
+        // The outer `zsh -ic` sources the user's .zshrc (so PATH is set up
+        // like a real terminal), then `exec`s into a NON-interactive zsh that
+        // evaluates the user's command. Going non-interactive is critical:
+        // interactive zsh ignores SIGTERM at the C level, which would defeat
+        // stop(). The exec means the outer interactive zsh disappears entirely
+        // — the live pid runs non-interactive zsh (or the user command itself,
+        // if zsh exec-optimizes a final simple command).
+        cmd.arg("-ic");
+        cmd.arg(r#"exec zsh -c "$SWITCHBOARD_USER_CMD""#);
+        cmd.cwd(&entry.directory);
 
+        self.spawn_pty(entry.id.clone(), cmd, entry.port, on_exit)
+            .await
+    }
+
+    /// Spawn a one-off interactive login zsh in `directory` and register it
+    /// in the running map under a `oneoff:<ULID>` id. Reuses the full PTY /
+    /// broadcast / ring-buffer / log file plumbing so the existing `attach`,
+    /// `write_pty`, `resize`, `stop`, and scrollback paths all work unchanged.
+    pub async fn open_shell(
+        &self,
+        app: tauri::AppHandle,
+        directory: String,
+    ) -> Result<String> {
+        let id = format!("{SHELL_ID_PREFIX}{}", Ulid::new());
+
+        let mut cmd = CommandBuilder::new("zsh");
+        for (k, v) in std::env::vars_os() {
+            cmd.env(k, v);
+        }
+        // Interactive login shell — same affordances as opening a real
+        // terminal: sources .zshrc / .zprofile, prompts, line editing.
+        cmd.arg("-il");
+        cmd.cwd(&directory);
+
+        let app_for_cb = app.clone();
+        let on_exit: ExitCallback = Box::new(move |id, code| {
+            // Shells emit the same `app-exit` event shape as user apps so the
+            // frontend store can clear any (unused) runtime entry it accreted.
+            let _ = app_for_cb.emit(
+                "app-exit",
+                ExitPayload {
+                    id: id.to_string(),
+                    code,
+                },
+            );
+        });
+
+        self.spawn_pty(id.clone(), cmd, None, on_exit).await?;
+        Ok(id)
+    }
+
+    /// Close a one-off shell: stop the underlying process and drop its
+    /// scrollback. Idempotent — safe to call after the shell has exited.
+    pub async fn close_shell(&self, id: &str) -> Result<()> {
+        self.stop(id).await?;
+        self.clear_ring(id);
+        Ok(())
+    }
+
+    /// Shared spawn path used by both `start_with_callback` (user apps) and
+    /// `open_shell` (one-off shells). Owns the dup-check race guard, port
+    /// pre-flight, PTY/broadcast/ring/reader/waiter setup, and the final map
+    /// insert. Returns the spawned PID.
+    async fn spawn_pty(
+        &self,
+        id: String,
+        cmd: CommandBuilder,
+        port: Option<u16>,
+        on_exit: ExitCallback,
+    ) -> Result<u32> {
         // Atomic dup-check + claim. Holding `starting` for the duration of
         // spawn prevents a second concurrent start(id) from passing the
         // running-map check and leaking a child by overwriting the first
         // RunningApp on insert. Released on success (after insert) or via
-        // the StartGuard's Drop on any error path.
+        // the StartGuard's Drop on any error path. For shells the id is a
+        // fresh ULID so the dup branch never fires — harmless.
         {
             let mut inner = self.inner.lock().unwrap();
             if inner.running.contains_key(&id) || inner.starting.contains(&id) {
@@ -315,9 +406,9 @@ impl ProcessManager {
         };
 
         // Pre-flight: free the configured port. Catches stale leftovers from
-        // a previous run that didn't shut down cleanly.
+        // a previous run that didn't shut down cleanly. Shells pass None here.
         #[cfg(unix)]
-        if let Some(p) = entry.port {
+        if let Some(p) = port {
             let _ = sweep_port(p).await;
         }
 
@@ -340,29 +431,7 @@ impl ProcessManager {
             })
             .context("openpty failed")?;
 
-        // Inherit env first so PATH/HOME/asdf shims/etc. resolve the same as
-        // running the command by hand.
-        let mut cmd = CommandBuilder::new("zsh");
-        for (k, v) in std::env::vars_os() {
-            cmd.env(k, v);
-        }
-        // Pass the user's command via an env var to avoid shell-quoting issues.
-        cmd.env("SWITCHBOARD_USER_CMD", &entry.command);
-        // The outer `zsh -ic` sources the user's .zshrc (so PATH is set up
-        // like a real terminal), then `exec`s into a NON-interactive zsh that
-        // evaluates the user's command. Going non-interactive is critical:
-        // interactive zsh ignores SIGTERM at the C level, which would defeat
-        // stop(). The exec means the outer interactive zsh disappears entirely
-        // — the live pid runs non-interactive zsh (or the user command itself,
-        // if zsh exec-optimizes a final simple command).
-        cmd.arg("-ic");
-        cmd.arg(r#"exec zsh -c "$SWITCHBOARD_USER_CMD""#);
-        cmd.cwd(&entry.directory);
-
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .with_context(|| format!("spawning command in {}", entry.directory))?;
+        let child = pair.slave.spawn_command(cmd).context("spawning command")?;
         let pid = child.process_id().context("child has no PID")?;
 
         // Drop the slave so the master sees EOF after the child exits.
@@ -432,7 +501,7 @@ impl ProcessManager {
                     pty_writer,
                     master,
                     notify_exit,
-                    port: entry.port,
+                    port,
                 },
             );
             // A fresh run clears stale last_exit.
@@ -1328,6 +1397,15 @@ mod tests {
         assert!(!pm.recent_snapshot("zap").is_empty());
         pm.clear_ring("zap");
         assert!(pm.recent_snapshot("zap").is_empty(), "ring not cleared");
+    }
+
+    #[test]
+    fn shell_id_has_oneoff_prefix_and_ulid_suffix() {
+        // ULIDs are 26 chars; the prefix is `oneoff:` (7 chars). This locks
+        // the id shape the running_count / stats sampler filters depend on.
+        let id = format!("{SHELL_ID_PREFIX}{}", Ulid::new());
+        assert!(id.starts_with(SHELL_ID_PREFIX), "id was {id}");
+        assert_eq!(id.len(), SHELL_ID_PREFIX.len() + 26, "id was {id}");
     }
 
     #[test]

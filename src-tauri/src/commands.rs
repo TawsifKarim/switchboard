@@ -192,6 +192,32 @@ pub async fn resize_pty(
 }
 
 #[tauri::command]
+pub async fn open_shell(
+    app: AppHandle,
+    pm: tauri::State<'_, Arc<ProcessManager>>,
+    directory: String,
+) -> Result<String, String> {
+    let dir = directory.trim();
+    if dir.is_empty() {
+        return Err("directory must not be empty".into());
+    }
+    if !Path::new(dir).is_dir() {
+        return Err(format!("directory does not exist: {dir}"));
+    }
+    pm.open_shell(app.clone(), dir.to_string())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn close_shell(
+    pm: tauri::State<'_, Arc<ProcessManager>>,
+    id: String,
+) -> Result<(), String> {
+    pm.close_shell(&id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn get_branch(directory: String) -> Result<Option<String>, String> {
     use tokio::process::Command;
     let dir = directory.trim();

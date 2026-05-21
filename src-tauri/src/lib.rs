@@ -96,7 +96,9 @@ pub fn run() {
             commands::detach_pty,
             commands::write_pty,
             commands::resize_pty,
-            commands::get_branch
+            commands::get_branch,
+            commands::open_shell,
+            commands::close_shell
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
