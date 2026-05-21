@@ -21,6 +21,24 @@ pub struct AppEntry {
     /// `#[serde(default)]`. Schema version stays at 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// Optional readiness probe. When set, "ready" requires both PTY-alive AND
+    /// the probe succeeding. Additive — old apps.json files load with `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready: Option<ReadyProbe>,
+}
+
+/// What it means for an app to be "ready" beyond just having its PTY alive.
+/// Tagged enum: `{"kind": "tcp", "port": 8080}` etc.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReadyProbe {
+    Tcp { port: u16 },
+    Http {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect_status: Option<u16>,
+    },
+    LogRegex { pattern: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -193,6 +211,7 @@ mod tests {
             command: "echo hi".to_string(),
             tag: "#3b82f6".to_string(),
             port: None,
+            ready: None,
         }
     }
 
@@ -318,6 +337,56 @@ mod tests {
         assert!(on_disk.contains("\"port\": 8080"), "missing port in: {on_disk}");
         let loaded = load(&path).unwrap();
         assert_eq!(loaded[0].port, Some(8080));
+    }
+
+    /// Legacy apps.json missing the `ready` field must still load (additive).
+    #[test]
+    fn load_legacy_without_ready() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let legacy = serde_json::json!({
+            "version": 1,
+            "apps": [{
+                "id": "01H1",
+                "name": "legacy",
+                "directory": "/tmp",
+                "command": "echo hi",
+                "tag": "#3b82f6"
+            }]
+        });
+        fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].ready, None);
+    }
+
+    #[test]
+    fn ready_probe_tcp_roundtrips() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let mut entry = sample("01H1");
+        entry.ready = Some(ReadyProbe::Tcp { port: 8080 });
+        save(&path, &[entry.clone()]).unwrap();
+        let on_disk = fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("\"kind\": \"tcp\""), "got: {on_disk}");
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded[0].ready, Some(ReadyProbe::Tcp { port: 8080 }));
+    }
+
+    #[test]
+    fn ready_probe_log_regex_roundtrips() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let mut entry = sample("01H1");
+        entry.ready = Some(ReadyProbe::LogRegex {
+            pattern: "listening on".into(),
+        });
+        save(&path, &[entry.clone()]).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(
+            loaded[0].ready,
+            Some(ReadyProbe::LogRegex { pattern: "listening on".into() })
+        );
     }
 
     /// With no port, the serialized form omits the field (skip_serializing_if).

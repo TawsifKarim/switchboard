@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tauri::AppHandle;
 use ulid::Ulid;
 
-use crate::config::{self, AppEntry};
+use crate::config::{self, AppEntry, ReadyProbe};
 use crate::process::{ProcessManager, StatusSnapshot};
 
 const DEFAULT_TAG: &str = "#64748b"; // slate-500
@@ -29,6 +29,7 @@ pub async fn add_app(
     command: String,
     tag: String,
     port: Option<u16>,
+    ready: Option<ReadyProbe>,
 ) -> Result<AppEntry, String> {
     let name = name.trim().to_string();
     let directory = directory.trim().to_string();
@@ -51,6 +52,27 @@ pub async fn add_app(
         return Err("port must be between 1 and 65535".into());
     }
 
+    // Validate probe specifics so a broken config can't sneak into apps.json.
+    if let Some(ref p) = ready {
+        match p {
+            ReadyProbe::Tcp { port: 0 } => {
+                return Err("ready.tcp.port must be between 1 and 65535".into())
+            }
+            ReadyProbe::Http { url, .. } if url.trim().is_empty() => {
+                return Err("ready.http.url must not be empty".into())
+            }
+            ReadyProbe::LogRegex { pattern } if pattern.trim().is_empty() => {
+                return Err("ready.log_regex.pattern must not be empty".into())
+            }
+            ReadyProbe::LogRegex { pattern } => {
+                if let Err(e) = regex::Regex::new(pattern) {
+                    return Err(format!("invalid log_regex pattern: {e}"));
+                }
+            }
+            _ => {}
+        }
+    }
+
     let tag = if tag.is_empty() { DEFAULT_TAG.to_string() } else { tag.to_string() };
 
     let entry = AppEntry {
@@ -60,6 +82,7 @@ pub async fn add_app(
         command,
         tag,
         port,
+        ready,
     };
 
     let path = config::config_path(&app).map_err(|e| e.to_string())?;

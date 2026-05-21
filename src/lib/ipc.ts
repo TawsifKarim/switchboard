@@ -1,5 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 
+export type ReadyProbe =
+  | { kind: "tcp"; port: number }
+  | { kind: "http"; url: string; expect_status?: number | null }
+  | { kind: "log_regex"; pattern: string };
+
 export type AppEntry = {
   id: string;
   name: string;
@@ -7,6 +12,7 @@ export type AppEntry = {
   command: string;
   tag: string;
   port?: number | null;
+  ready?: ReadyProbe | null;
 };
 
 export const listApps = () => invoke<AppEntry[]>("list_apps");
@@ -17,7 +23,8 @@ export const addApp = (
   command: string,
   tag: string,
   port: number | null = null,
-) => invoke<AppEntry>("add_app", { name, directory, command, tag, port });
+  ready: ReadyProbe | null = null,
+) => invoke<AppEntry>("add_app", { name, directory, command, tag, port, ready });
 
 export const deleteApp = (id: string) => invoke<void>("delete_app", { id });
 
@@ -28,6 +35,7 @@ export type StatusSnapshot = {
   running: boolean;
   pid: number | null;
   last_exit: number | null;
+  ready: boolean;
 };
 
 export const startApp = (id: string) => invoke<number>("start_app", { id });
@@ -43,6 +51,8 @@ export const startAll = () => invoke<StartAllResult>("start_all");
 export const stopAll = () => invoke<void>("stop_all");
 
 export type ExitEvent = { id: string; code: number };
+
+export type ReadyEvent = { id: string; ready: boolean; reason?: string };
 
 export type AppStats = { id: string; cpu_pct: number; rss_bytes: number };
 

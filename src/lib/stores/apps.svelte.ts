@@ -12,6 +12,8 @@ import {
   type AppEntry,
   type AppStats,
   type ExitEvent,
+  type ReadyEvent,
+  type ReadyProbe,
 } from "$lib/ipc";
 
 export type RuntimeStatus = "stopped" | "starting" | "running" | "stopping";
@@ -20,12 +22,14 @@ export type RuntimeState = {
   status: RuntimeStatus;
   pid: number | null;
   exitCode: number | null;
+  ready: boolean;
 };
 
 const DEFAULT_RUNTIME: RuntimeState = {
   status: "stopped",
   pid: null,
   exitCode: null,
+  ready: false,
 };
 
 class AppsStore {
@@ -37,6 +41,7 @@ class AppsStore {
 
   private unlisten: UnlistenFn | null = null;
   private unlistenStats: UnlistenFn | null = null;
+  private unlistenReady: UnlistenFn | null = null;
   private initialized = false;
 
   focus(id: string | null): void {
@@ -55,6 +60,11 @@ class AppsStore {
     this.unlistenStats = await listen<AppStats>("app-stats", (e) => {
       this.stats[e.payload.id] = e.payload;
     });
+    this.unlistenReady = await listen<ReadyEvent>("app-ready", (e) => {
+      const cur = this.runtime[e.payload.id];
+      if (!cur) return;
+      this.runtime[e.payload.id] = { ...cur, ready: e.payload.ready };
+    });
   }
 
   async refresh(): Promise<void> {
@@ -72,8 +82,9 @@ class AppsStore {
     command: string,
     tag: string,
     port: number | null = null,
+    ready: ReadyProbe | null = null,
   ): Promise<AppEntry> {
-    const entry = await addApp(name, directory, command, tag, port);
+    const entry = await addApp(name, directory, command, tag, port, ready);
     await this.refresh();
     return entry;
   }
@@ -213,7 +224,9 @@ class AppsStore {
   }
 
   private setStarting(id: string): void {
-    this.runtime[id] = { status: "starting", pid: null, exitCode: null };
+    // Reset ready on every start — the probe will flip it true if/when it
+    // resolves. Avoids stale green after a restart.
+    this.runtime[id] = { status: "starting", pid: null, exitCode: null, ready: false };
   }
 
   private setStopping(id: string): void {
@@ -222,11 +235,13 @@ class AppsStore {
       status: "stopping",
       pid: prev?.pid ?? null,
       exitCode: null,
+      ready: prev?.ready ?? false,
     };
   }
 
   private setRunning(id: string, pid: number): void {
-    this.runtime[id] = { status: "running", pid, exitCode: null };
+    const prev = this.runtime[id];
+    this.runtime[id] = { status: "running", pid, exitCode: null, ready: prev?.ready ?? false };
   }
 
   private setStopped(id: string, exitCode: number | null): void {
@@ -235,6 +250,7 @@ class AppsStore {
       status: "stopped",
       pid: prev?.pid ?? null,
       exitCode,
+      ready: false,
     };
   }
 }

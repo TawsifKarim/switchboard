@@ -7,6 +7,7 @@
   import FolderOpen from "@lucide/svelte/icons/folder-open";
   import { open as openDialog } from "@tauri-apps/plugin-dialog";
   import { apps } from "$lib/stores/apps.svelte";
+  import type { ReadyProbe } from "$lib/ipc";
 
   let open = $state(false);
   let name = $state("");
@@ -17,10 +18,36 @@
   let error = $state("");
   let submitting = $state(false);
 
+  // Readiness probe form state. Stored as strings so the UI can validate
+  // them the same way the port input does — the backend coerces.
+  let readyKind = $state<"none" | "tcp" | "http" | "log_regex">("none");
+  let readyTcpPort = $state("");
+  let readyHttpUrl = $state("");
+  let readyHttpStatus = $state("");
+  let readyLogPattern = $state("");
+
   const portIsValid = $derived.by(() => {
     if (portStr.trim() === "") return true;
     const n = Number(portStr);
     return Number.isInteger(n) && n >= 1 && n <= 65535;
+  });
+
+  const readyIsValid = $derived.by(() => {
+    if (readyKind === "none") return true;
+    if (readyKind === "tcp") {
+      const n = Number(readyTcpPort);
+      return Number.isInteger(n) && n >= 1 && n <= 65535;
+    }
+    if (readyKind === "http") {
+      if (readyHttpUrl.trim() === "") return false;
+      if (readyHttpStatus.trim() !== "") {
+        const n = Number(readyHttpStatus);
+        if (!Number.isInteger(n) || n < 100 || n > 599) return false;
+      }
+      return true;
+    }
+    if (readyKind === "log_regex") return readyLogPattern.trim() !== "";
+    return true;
   });
 
   let canSubmit = $derived(
@@ -28,8 +55,27 @@
       directory.trim().length > 0 &&
       command.trim().length > 0 &&
       portIsValid &&
+      readyIsValid &&
       !submitting,
   );
+
+  function buildProbe(): ReadyProbe | null {
+    switch (readyKind) {
+      case "tcp":
+        return { kind: "tcp", port: Number(readyTcpPort) };
+      case "http":
+        return {
+          kind: "http",
+          url: readyHttpUrl.trim(),
+          expect_status:
+            readyHttpStatus.trim() === "" ? null : Number(readyHttpStatus),
+        };
+      case "log_regex":
+        return { kind: "log_regex", pattern: readyLogPattern };
+      default:
+        return null;
+    }
+  }
 
   function reset() {
     name = "";
@@ -37,6 +83,11 @@
     command = "";
     tag = "#64748b";
     portStr = "";
+    readyKind = "none";
+    readyTcpPort = "";
+    readyHttpUrl = "";
+    readyHttpStatus = "";
+    readyLogPattern = "";
     error = "";
     submitting = false;
   }
@@ -57,7 +108,8 @@
     submitting = true;
     try {
       const port = portStr.trim() === "" ? null : Number(portStr);
-      await apps.add(name.trim(), directory.trim(), command.trim(), tag, port);
+      const probe = buildProbe();
+      await apps.add(name.trim(), directory.trim(), command.trim(), tag, port, probe);
       open = false;
       reset();
     } catch (e) {
@@ -127,6 +179,60 @@
         {:else}
           <p class="text-xs text-muted-foreground">
             When set, anything bound to this port is killed before start and after stop.
+          </p>
+        {/if}
+      </div>
+      <div class="grid gap-1.5">
+        <Label for="app-ready-kind">
+          Readiness check <span class="text-muted-foreground">(optional)</span>
+        </Label>
+        <select
+          id="app-ready-kind"
+          bind:value={readyKind}
+          class="border-input bg-background h-9 rounded-md border px-3 text-sm shadow-sm focus-visible:ring-1 focus-visible:outline-none"
+        >
+          <option value="none">None</option>
+          <option value="tcp">TCP port</option>
+          <option value="http">HTTP endpoint</option>
+          <option value="log_regex">Log line match</option>
+        </select>
+        {#if readyKind === "tcp"}
+          <Input
+            type="text"
+            inputmode="numeric"
+            pattern="[0-9]*"
+            bind:value={readyTcpPort}
+            placeholder="8080"
+            aria-label="TCP port"
+          />
+        {:else if readyKind === "http"}
+          <Input
+            type="text"
+            bind:value={readyHttpUrl}
+            placeholder="http://localhost:8080/healthz"
+            aria-label="HTTP URL"
+          />
+          <Input
+            type="text"
+            inputmode="numeric"
+            pattern="[0-9]*"
+            bind:value={readyHttpStatus}
+            placeholder="Expected status (blank = any 2xx/3xx)"
+            aria-label="Expected status"
+          />
+        {:else if readyKind === "log_regex"}
+          <Input
+            type="text"
+            bind:value={readyLogPattern}
+            placeholder="listening on"
+            aria-label="Log regex"
+          />
+        {/if}
+        {#if readyKind !== "none" && !readyIsValid}
+          <p class="text-xs text-destructive">Fill out the probe fields.</p>
+        {:else if readyKind !== "none"}
+          <p class="text-xs text-muted-foreground">
+            Service is "ready" once the probe succeeds (60s timeout).
           </p>
         {/if}
       </div>

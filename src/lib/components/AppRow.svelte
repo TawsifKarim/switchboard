@@ -51,6 +51,12 @@
   const crashed = $derived(
     rt.status === "stopped" && rt.exitCode != null && rt.exitCode !== 0,
   );
+  // Dot opacity: full when ready/idle, dim while waiting for the probe (or
+  // while starting). Crashed paths bypass this — destructive red is its own
+  // signal. Stopped (clean) stays full so the user sees the tag color.
+  const dotDim = $derived(
+    rt.status === "starting" || (isRunning && !rt.ready),
+  );
   const stats = $derived(apps.stats[entry.id]);
   function formatRss(bytes: number): string {
     if (bytes >= 1024 * 1024) return `${Math.round(bytes / (1024 * 1024))} MB`;
@@ -101,8 +107,10 @@
   </span>
   <span
     class="size-2.5 shrink-0 rounded-full {crashed ? 'bg-destructive' : ''}"
-    style={crashed ? "" : `background-color: ${entry.tag}`}
-    aria-hidden="true"
+    style={crashed
+      ? ""
+      : `background-color: ${entry.tag}; opacity: ${dotDim ? 0.4 : 1}`}
+    aria-label={isRunning ? (rt.ready ? "ready" : "starting") : "stopped"}
   ></span>
   <div class="min-w-0 flex-1">
     <div class="truncate text-sm font-medium">{entry.name}</div>
