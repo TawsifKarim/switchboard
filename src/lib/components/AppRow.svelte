@@ -83,6 +83,7 @@
   });
 
   async function onToggle(on: boolean): Promise<void> {
+    apps.focus(entry.id);
     try {
       if (on) await apps.start(entry.id);
       else await apps.stop(entry.id);
