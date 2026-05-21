@@ -83,11 +83,27 @@ class AppsStore {
     tag: string,
     port: number | null = null,
     ready: ReadyProbe | null = null,
+    dependsOn: string[] = [],
   ): Promise<AppEntry> {
-    const entry = await addApp(name, directory, command, tag, port, ready);
+    const entry = await addApp(
+      name,
+      directory,
+      command,
+      tag,
+      port,
+      ready,
+      dependsOn,
+    );
     await this.refresh();
     return entry;
   }
+
+  /** Most recent start_all outcome, surfaced for inline UI banners. */
+  lastStartAll = $state<{
+    started: number;
+    failed: [string, string][];
+    skipped: [string, string][];
+  } | null>(null);
 
   /** Live order update from dnd `consider` events — no backend call. */
   setOrder(items: AppEntry[]): void {
@@ -175,11 +191,21 @@ class AppsStore {
         this.setStopped(id, null);
         console.warn("start_all: failed to start", id, err);
       }
-      if (result.failed.length) {
+      // Skipped apps were never started — revert their optimistic 'starting'
+      // markers so the UI doesn't show them spinning forever.
+      for (const [id] of result.skipped) {
+        this.setStopped(id, null);
+      }
+      if (result.failed.length || result.skipped.length) {
         console.warn(
-          `start_all: ${result.started.length} started, ${result.failed.length} failed`,
+          `start_all: ${result.started.length} started, ${result.failed.length} failed, ${result.skipped.length} skipped`,
         );
       }
+      this.lastStartAll = {
+        started: result.started.length,
+        failed: result.failed,
+        skipped: result.skipped,
+      };
     } catch (e) {
       console.error("start_all failed", e);
       // Best-effort revert of optimistic 'starting' markers.

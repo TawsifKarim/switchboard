@@ -25,6 +25,11 @@ pub struct AppEntry {
     /// the probe succeeding. Additive — old apps.json files load with `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ready: Option<ReadyProbe>,
+    /// Ids of parent apps that must reach ready=true before this app is
+    /// started by `start_all`. Empty list = no constraint. Additive — old
+    /// apps.json files load with `Vec::new()`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
 }
 
 /// What it means for an app to be "ready" beyond just having its PTY alive.
@@ -212,6 +217,7 @@ mod tests {
             tag: "#3b82f6".to_string(),
             port: None,
             ready: None,
+            depends_on: Vec::new(),
         }
     }
 
@@ -371,6 +377,49 @@ mod tests {
         assert!(on_disk.contains("\"kind\": \"tcp\""), "got: {on_disk}");
         let loaded = load(&path).unwrap();
         assert_eq!(loaded[0].ready, Some(ReadyProbe::Tcp { port: 8080 }));
+    }
+
+    /// Legacy apps.json missing the `depends_on` field must still load (additive).
+    #[test]
+    fn load_legacy_without_depends_on() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let legacy = serde_json::json!({
+            "version": 1,
+            "apps": [{
+                "id": "01H1",
+                "name": "legacy",
+                "directory": "/tmp",
+                "command": "echo hi",
+                "tag": "#3b82f6"
+            }]
+        });
+        fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].depends_on.is_empty());
+    }
+
+    #[test]
+    fn depends_on_roundtrips() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let mut entry = sample("01H1");
+        entry.depends_on = vec!["01H2".into(), "01H3".into()];
+        save(&path, &[entry.clone()]).unwrap();
+        let on_disk = fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("\"depends_on\""), "got: {on_disk}");
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded[0].depends_on, vec!["01H2", "01H3"]);
+    }
+
+    #[test]
+    fn depends_on_empty_is_omitted_on_save() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        save(&path, &[sample("01H1")]).unwrap();
+        let on_disk = fs::read_to_string(&path).unwrap();
+        assert!(!on_disk.contains("depends_on"), "should omit: {on_disk}");
     }
 
     #[test]

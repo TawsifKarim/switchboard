@@ -1,4 +1,5 @@
 mod config;
+mod graph;
 mod process;
 mod commands;
 mod tray;

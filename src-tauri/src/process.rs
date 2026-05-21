@@ -194,10 +194,16 @@ struct Inner {
 pub struct ProcessManager {
     inner: Arc<Mutex<Inner>>,
     log_dir: PathBuf,
+    /// Broadcasts every probe resolution (positive or negative) for orderly
+    /// `start_all` to await without polling. Independent from the per-app PTY
+    /// broadcast — capacity is small because slow consumers can lag a few
+    /// events without breaking correctness (start_all reconciles via status).
+    ready_broadcast: broadcast::Sender<ReadyPayload>,
 }
 
 impl ProcessManager {
     pub fn new(log_dir: PathBuf) -> Self {
+        let (ready_broadcast, _) = broadcast::channel(64);
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 running: HashMap::new(),
@@ -209,7 +215,15 @@ impl ProcessManager {
                 sampler_started: false,
             })),
             log_dir,
+            ready_broadcast,
         }
+    }
+
+    /// Subscribe to per-app readiness resolutions. Subscribe BEFORE calling
+    /// `start` if you need to deterministically observe the event (probe-less
+    /// apps fire synchronously inside spawn_pty).
+    pub fn subscribe_ready(&self) -> broadcast::Receiver<ReadyPayload> {
+        self.ready_broadcast.subscribe()
     }
 
     /// Spawn the background task that samples CPU + RAM for every running app
@@ -305,15 +319,17 @@ impl ProcessManager {
                 },
             );
         });
+        let ready_tx = self.ready_broadcast.clone();
         let on_ready: ReadyCallback = Box::new(move |id, ready, reason| {
-            let _ = app_for_ready.emit(
-                "app-ready",
-                ReadyPayload {
-                    id: id.to_string(),
-                    ready,
-                    reason,
-                },
-            );
+            let payload = ReadyPayload {
+                id: id.to_string(),
+                ready,
+                reason,
+            };
+            let _ = app_for_ready.emit("app-ready", payload.clone());
+            // No receivers is normal (frontend listens via Tauri event); send
+            // is best-effort.
+            let _ = ready_tx.send(payload);
         });
         let pid = self
             .start_with_callback(entry, on_exit, Some(on_ready))
@@ -1121,6 +1137,7 @@ mod tests {
             tag: "#000000".to_string(),
             port: None,
             ready: None,
+            depends_on: Vec::new(),
         }
     }
 

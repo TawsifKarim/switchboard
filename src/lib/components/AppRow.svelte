@@ -9,6 +9,7 @@
   import Loader2 from "@lucide/svelte/icons/loader-2";
   import GripVertical from "@lucide/svelte/icons/grip-vertical";
   import GitBranch from "@lucide/svelte/icons/git-branch";
+  import CornerDownRight from "@lucide/svelte/icons/corner-down-right";
   import { apps } from "$lib/stores/apps.svelte";
   import { getBranch, type AppEntry } from "$lib/ipc";
 
@@ -63,6 +64,17 @@
     if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
     return `${bytes} B`;
   }
+  // Display the dep parents by name (not id). Truncate the combined string so
+  // the row layout stays predictable on a narrow split.
+  const depsLabel = $derived.by(() => {
+    const ids = entry.depends_on ?? [];
+    if (ids.length === 0) return "";
+    const byId = new Map(apps.apps.map((a) => [a.id, a.name]));
+    const names = ids.map((id) => byId.get(id) ?? id.slice(0, 6));
+    const joined = names.join(", ");
+    return joined.length > 32 ? joined.slice(0, 31) + "…" : joined;
+  });
+
   const fallbackLabel = $derived.by(() => {
     if (rt.status === "starting") return "…";
     if (rt.status === "stopping") return "terminating…";
@@ -120,6 +132,14 @@
       >
         <GitBranch class="size-3 shrink-0" />
         <span class="truncate">{branch.length > 24 ? branch.slice(0, 23) + "…" : branch}</span>
+      </div>
+    {/if}
+    {#if depsLabel}
+      <div
+        class="flex items-center gap-1 truncate text-[11px] text-muted-foreground"
+      >
+        <CornerDownRight class="size-3 shrink-0" />
+        <span class="truncate">depends on: {depsLabel}</span>
       </div>
     {/if}
     <div

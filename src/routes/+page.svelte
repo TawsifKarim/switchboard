@@ -105,6 +105,29 @@
     return { cpu, rss, hasAny };
   });
 
+  const startAllNotice = $derived.by(() => {
+    const r = apps.lastStartAll;
+    if (!r) return "";
+    const byId = new Map(apps.apps.map((a) => [a.id, a.name]));
+    const parts: string[] = [];
+    if (r.skipped.length) {
+      const first = byId.get(r.skipped[0][0]) ?? r.skipped[0][0];
+      parts.push(
+        r.skipped.length === 1
+          ? `${first} skipped (${r.skipped[0][1]})`
+          : `${r.skipped.length} apps skipped — first: ${first}`,
+      );
+    }
+    if (r.failed.length) {
+      parts.push(`${r.failed.length} failed to start`);
+    }
+    return parts.join(" · ");
+  });
+
+  function dismissStartAllNotice() {
+    apps.lastStartAll = null;
+  }
+
   function formatRss(bytes: number): string {
     if (bytes >= 1024 * 1024 * 1024)
       return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
@@ -168,6 +191,22 @@
       style="width: {leftWidth}px; flex: 0 0 auto;"
     >
       <div class="flex flex-col gap-2 p-3">
+        {#if startAllNotice}
+          <div
+            class="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
+            role="status"
+          >
+            <span class="flex-1">{startAllNotice}</span>
+            <button
+              type="button"
+              class="text-muted-foreground hover:text-foreground"
+              aria-label="Dismiss"
+              onclick={dismissStartAllNotice}
+            >
+              ×
+            </button>
+          </div>
+        {/if}
         {#if !apps.loaded}
           <p class="px-2 py-8 text-center text-sm text-muted-foreground">
             Loading...

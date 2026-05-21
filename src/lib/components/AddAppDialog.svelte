@@ -26,6 +26,17 @@
   let readyHttpStatus = $state("");
   let readyLogPattern = $state("");
 
+  // Dependency selection: ids of existing apps this one depends on. The
+  // current app doesn't exist yet at add time so there's no self-dep risk.
+  let dependsOn = $state<string[]>([]);
+  function toggleDep(id: string, on: boolean) {
+    if (on) {
+      if (!dependsOn.includes(id)) dependsOn = [...dependsOn, id];
+    } else {
+      dependsOn = dependsOn.filter((x) => x !== id);
+    }
+  }
+
   const portIsValid = $derived.by(() => {
     if (portStr.trim() === "") return true;
     const n = Number(portStr);
@@ -88,6 +99,7 @@
     readyHttpUrl = "";
     readyHttpStatus = "";
     readyLogPattern = "";
+    dependsOn = [];
     error = "";
     submitting = false;
   }
@@ -109,7 +121,15 @@
     try {
       const port = portStr.trim() === "" ? null : Number(portStr);
       const probe = buildProbe();
-      await apps.add(name.trim(), directory.trim(), command.trim(), tag, port, probe);
+      await apps.add(
+        name.trim(),
+        directory.trim(),
+        command.trim(),
+        tag,
+        port,
+        probe,
+        dependsOn,
+      );
       open = false;
       reset();
     } catch (e) {
@@ -236,6 +256,36 @@
           </p>
         {/if}
       </div>
+      {#if apps.apps.length > 0}
+        <div class="grid gap-1.5">
+          <Label>
+            Depends on <span class="text-muted-foreground">(optional)</span>
+          </Label>
+          <div
+            class="grid max-h-32 gap-1 overflow-y-auto rounded-md border bg-background p-2"
+          >
+            {#each apps.apps as parent (parent.id)}
+              <label class="flex cursor-pointer items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={dependsOn.includes(parent.id)}
+                  onchange={(e) =>
+                    toggleDep(parent.id, (e.currentTarget as HTMLInputElement).checked)}
+                />
+                <span
+                  class="inline-block size-2 rounded-full"
+                  style="background-color: {parent.tag}"
+                  aria-hidden="true"
+                ></span>
+                <span class="truncate">{parent.name}</span>
+              </label>
+            {/each}
+          </div>
+          <p class="text-xs text-muted-foreground">
+            Start All waits for each parent to report ready before starting this app.
+          </p>
+        </div>
+      {/if}
       <div class="grid gap-1.5">
         <Label for="app-tag">Tag color</Label>
         <input
