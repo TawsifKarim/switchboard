@@ -9,6 +9,12 @@ use crate::process::{ProcessManager, StatusSnapshot};
 
 const DEFAULT_TAG: &str = "#64748b"; // slate-500
 
+#[derive(serde::Serialize)]
+pub struct StartAllResult {
+    pub started: Vec<String>,
+    pub failed: Vec<(String, String)>,
+}
+
 #[tauri::command]
 pub async fn list_apps(app: AppHandle) -> Result<Vec<AppEntry>, String> {
     let path = config::config_path(&app).map_err(|e| e.to_string())?;
@@ -108,6 +114,35 @@ pub async fn stop_app(
     id: String,
 ) -> Result<(), String> {
     pm.stop(&id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn start_all(
+    app: AppHandle,
+    pm: tauri::State<'_, Arc<ProcessManager>>,
+) -> Result<StartAllResult, String> {
+    let path = config::config_path(&app).map_err(|e| e.to_string())?;
+    let apps = config::load(&path).map_err(|e| e.to_string())?;
+    let mut started = Vec::new();
+    let mut failed = Vec::new();
+    for entry in apps {
+        if pm.status(&entry.id).await.running {
+            continue;
+        }
+        let id = entry.id.clone();
+        match pm.start(app.clone(), entry).await {
+            Ok(_) => started.push(id),
+            Err(e) => failed.push((id, e.to_string())),
+        }
+    }
+    Ok(StartAllResult { started, failed })
+}
+
+#[tauri::command]
+pub async fn stop_all(
+    pm: tauri::State<'_, Arc<ProcessManager>>,
+) -> Result<(), String> {
+    pm.stop_all().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]

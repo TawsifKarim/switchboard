@@ -2,9 +2,12 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   addApp,
   deleteApp,
+  getStatus,
   listApps,
   reorderApps,
+  startAll,
   startApp,
+  stopAll,
   stopApp,
   type AppEntry,
   type AppStats,
@@ -112,6 +115,84 @@ class AppsStore {
       this.setRunning(id, pid);
     } catch (e) {
       this.setStopped(id, null);
+      throw e;
+    }
+  }
+
+  async startAll(): Promise<void> {
+    // Mark every not-yet-running app as starting so the UI reflects intent
+    // immediately; the backend skips ones already running.
+    for (const a of this.apps) {
+      const rt = this.runtime[a.id];
+      if (!rt || rt.status === "stopped") this.setStarting(a.id);
+    }
+    try {
+      const result = await startAll();
+      // Pull the assigned PID for each newly-started app and flip to running.
+      await Promise.all(
+        result.started.map(async (id) => {
+          try {
+            const s = await getStatus(id);
+            if (s.running && s.pid != null) this.setRunning(id, s.pid);
+            else this.setStopped(id, s.last_exit);
+          } catch (e) {
+            console.error("getStatus after start_all failed", id, e);
+          }
+        }),
+      );
+      // Revert any "starting" markers for ids that didn't start.
+      const startedSet = new Set(result.started);
+      const failedSet = new Set(result.failed.map(([id]) => id));
+      for (const a of this.apps) {
+        const rt = this.runtime[a.id];
+        if (
+          rt?.status === "starting" &&
+          !startedSet.has(a.id) &&
+          !failedSet.has(a.id)
+        ) {
+          // Was already running on the backend side; sync from status.
+          try {
+            const s = await getStatus(a.id);
+            if (s.running && s.pid != null) this.setRunning(a.id, s.pid);
+            else this.setStopped(a.id, s.last_exit);
+          } catch {
+            this.setStopped(a.id, null);
+          }
+        }
+      }
+      for (const [id, err] of result.failed) {
+        this.setStopped(id, null);
+        console.warn("start_all: failed to start", id, err);
+      }
+      if (result.failed.length) {
+        console.warn(
+          `start_all: ${result.started.length} started, ${result.failed.length} failed`,
+        );
+      }
+    } catch (e) {
+      console.error("start_all failed", e);
+      // Best-effort revert of optimistic 'starting' markers.
+      for (const a of this.apps) {
+        if (this.runtime[a.id]?.status === "starting") {
+          this.setStopped(a.id, null);
+        }
+      }
+      throw e;
+    }
+  }
+
+  async stopAll(): Promise<void> {
+    // Mark every running/starting app as stopping; exit events flip to stopped.
+    for (const a of this.apps) {
+      const rt = this.runtime[a.id];
+      if (rt?.status === "running" || rt?.status === "starting") {
+        this.setStopping(a.id);
+      }
+    }
+    try {
+      await stopAll();
+    } catch (e) {
+      console.error("stop_all failed", e);
       throw e;
     }
   }

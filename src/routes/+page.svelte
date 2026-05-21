@@ -3,6 +3,9 @@
   import AddAppDialog from "$lib/components/AddAppDialog.svelte";
   import AppRow from "$lib/components/AppRow.svelte";
   import TerminalPanel from "$lib/components/TerminalPanel.svelte";
+  import { Button } from "$lib/components/ui/button";
+  import Play from "@lucide/svelte/icons/play";
+  import Square from "@lucide/svelte/icons/square";
   import { apps } from "$lib/stores/apps.svelte";
   import { dndzone, type DndEvent } from "svelte-dnd-action";
   import type { AppEntry } from "$lib/ipc";
@@ -41,6 +44,17 @@
       ? ""
       : (apps.apps.find((a) => a.id === apps.focusedId)?.name ?? ""),
   );
+
+  const hasApps = $derived(apps.apps.length > 0);
+  const allRunning = $derived(
+    hasApps && apps.apps.every((a) => apps.runtime[a.id]?.status === "running"),
+  );
+  const anyActive = $derived(
+    apps.apps.some((a) => {
+      const s = apps.runtime[a.id]?.status;
+      return s === "running" || s === "starting" || s === "stopping";
+    }),
+  );
 </script>
 
 <div class="grid h-screen grid-rows-[auto_1fr]">
@@ -48,7 +62,29 @@
     class="flex items-center justify-between border-b px-4 py-3"
   >
     <h1 class="text-base font-semibold tracking-tight">Switchboard</h1>
-    <AddAppDialog />
+    <div class="flex items-center gap-2">
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={!hasApps || allRunning}
+        onclick={() =>
+          apps.startAll().catch((e) => console.error("start all failed", e))}
+      >
+        <Play class="size-4" />
+        Start all
+      </Button>
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={!hasApps || !anyActive}
+        onclick={() =>
+          apps.stopAll().catch((e) => console.error("stop all failed", e))}
+      >
+        <Square class="size-4" />
+        Stop all
+      </Button>
+      <AddAppDialog />
+    </div>
   </header>
 
   <div class="grid grid-cols-[minmax(320px,1fr)_2fr] overflow-hidden">

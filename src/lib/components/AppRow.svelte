@@ -87,28 +87,20 @@
       {/if}
       {#if isRunning}
         <span class="flex items-center gap-3 tabular-nums">
-          <span>
-            <span class="opacity-60">PID:</span>
-            <span class="inline-block min-w-[6ch]">{rt.pid}</span>
+          <span class="inline-block min-w-[10ch]">
+            <span class="opacity-60">PID:</span> {rt.pid}
           </span>
           {#if entry.port != null}
-            <span>
-              <span class="opacity-60">PORT:</span>
-              <span class="inline-block min-w-[5ch]">{entry.port}</span>
+            <span class="inline-block min-w-[10ch]">
+              <span class="opacity-60">PORT:</span> {entry.port}
             </span>
           {/if}
           {#if stats}
-            <span>
-              <span class="opacity-60">CPU:</span>
-              <span class="inline-block min-w-[4ch] text-right"
-                >{Math.round(stats.cpu_pct)}%</span
-              >
+            <span class="inline-block min-w-[8ch]">
+              <span class="opacity-60">CPU:</span> {Math.round(stats.cpu_pct)}%
             </span>
-            <span>
-              <span class="opacity-60">RAM:</span>
-              <span class="inline-block min-w-[7ch] text-right"
-                >{formatRss(stats.rss_bytes)}</span
-              >
+            <span class="inline-block min-w-[11ch]">
+              <span class="opacity-60">RAM:</span> {formatRss(stats.rss_bytes)}
             </span>
           {/if}
         </span>
