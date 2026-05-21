@@ -45,3 +45,6 @@ export const stopAll = () => invoke<void>("stop_all");
 export type ExitEvent = { id: string; code: number };
 
 export type AppStats = { id: string; cpu_pct: number; rss_bytes: number };
+
+export const getBranch = (directory: string) =>
+  invoke<string | null>("get_branch", { directory });

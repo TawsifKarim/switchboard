@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onMount, onDestroy } from "svelte";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { Button } from "$lib/components/ui/button";
   import { Switch } from "$lib/components/ui/switch";
   import * as AlertDialog from "$lib/components/ui/alert-dialog";
@@ -6,8 +8,9 @@
   import Trash2 from "@lucide/svelte/icons/trash-2";
   import Loader2 from "@lucide/svelte/icons/loader-2";
   import GripVertical from "@lucide/svelte/icons/grip-vertical";
+  import GitBranch from "@lucide/svelte/icons/git-branch";
   import { apps } from "$lib/stores/apps.svelte";
-  import type { AppEntry } from "$lib/ipc";
+  import { getBranch, type AppEntry } from "$lib/ipc";
 
   let {
     entry,
@@ -16,6 +19,30 @@
 
   let confirmOpen = $state(false);
   let deleting = $state(false);
+  let branch = $state<string | null>(null);
+
+  async function refreshBranch() {
+    try {
+      branch = await getBranch(entry.directory);
+    } catch {
+      branch = null;
+    }
+  }
+
+  let unlistenStarted: UnlistenFn | null = null;
+  onMount(() => {
+    refreshBranch();
+    listen<{ id: string; pid: number }>("app-started", (e) => {
+      if (e.payload.id === entry.id) refreshBranch();
+    })
+      .then((u) => {
+        unlistenStarted = u;
+      })
+      .catch(() => {});
+  });
+  onDestroy(() => {
+    if (unlistenStarted) unlistenStarted();
+  });
 
   const rt = $derived(apps.runtimeOf(entry.id));
   const isRunning = $derived(rt.status === "running");
@@ -79,6 +106,14 @@
   ></span>
   <div class="min-w-0 flex-1">
     <div class="truncate text-sm font-medium">{entry.name}</div>
+    {#if branch}
+      <div
+        class="flex items-center gap-1 truncate text-[11px] text-muted-foreground tabular-nums"
+      >
+        <GitBranch class="size-3 shrink-0" />
+        <span class="truncate">{branch.length > 24 ? branch.slice(0, 23) + "…" : branch}</span>
+      </div>
+    {/if}
     <div
       class="flex items-center gap-1.5 truncate text-xs {crashed ? 'text-destructive' : 'text-muted-foreground'}"
     >

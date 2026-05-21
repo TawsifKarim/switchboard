@@ -191,6 +191,48 @@ pub async fn resize_pty(
     pm.resize(&id, rows, cols).await.map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub async fn get_branch(directory: String) -> Result<Option<String>, String> {
+    use tokio::process::Command;
+    let dir = directory.trim();
+    if dir.is_empty() {
+        return Ok(None);
+    }
+    let out = match Command::new("git")
+        .args(["-C", dir, "rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(_) => return Ok(None),
+    };
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if name.is_empty() {
+        return Ok(None);
+    }
+    if name == "HEAD" {
+        // Detached: return short SHA prefixed with '@'.
+        let sha = match Command::new("git")
+            .args(["-C", dir, "rev-parse", "--short", "HEAD"])
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => {
+                String::from_utf8_lossy(&o.stdout).trim().to_string()
+            }
+            _ => return Ok(None),
+        };
+        if sha.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(format!("@{sha}")));
+    }
+    Ok(Some(name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
