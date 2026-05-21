@@ -35,9 +35,43 @@
     dragDisabled = true;
   }
 
+  const MIN_LEFT = 280;
+  const STORAGE_KEY = "switchboard:left-pane-width-px";
+  let leftWidth = $state(360);
+  let dragging = $state(false);
+
   onMount(() => {
     apps.init().catch((e) => console.error("apps.init failed", e));
+    try {
+      const saved = Number(localStorage.getItem(STORAGE_KEY));
+      if (Number.isFinite(saved) && saved >= MIN_LEFT) {
+        leftWidth = saved;
+      }
+    } catch {}
   });
+
+  function clampLeft(px: number): number {
+    const vw = window.innerWidth;
+    const max = Math.min(vw * 0.7, vw - 320);
+    return Math.max(MIN_LEFT, Math.min(max, px));
+  }
+  function startResize(e: PointerEvent) {
+    dragging = true;
+    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    e.preventDefault();
+  }
+  function onMove(e: PointerEvent) {
+    if (!dragging) return;
+    leftWidth = clampLeft(e.clientX);
+  }
+  function endResize(e: PointerEvent) {
+    if (!dragging) return;
+    dragging = false;
+    (e.target as HTMLElement).releasePointerCapture?.(e.pointerId);
+    try {
+      localStorage.setItem(STORAGE_KEY, String(Math.round(leftWidth)));
+    } catch {}
+  }
 
   const focusedName = $derived(
     apps.focusedId == null
@@ -55,13 +89,54 @@
       return s === "running" || s === "starting" || s === "stopping";
     }),
   );
+
+  const totals = $derived.by(() => {
+    let cpu = 0;
+    let rss = 0;
+    let hasAny = false;
+    for (const a of apps.apps) {
+      if (apps.runtime[a.id]?.status !== "running") continue;
+      const s = apps.stats[a.id];
+      if (!s) continue;
+      cpu += s.cpu_pct;
+      rss += s.rss_bytes;
+      hasAny = true;
+    }
+    return { cpu, rss, hasAny };
+  });
+
+  function formatRss(bytes: number): string {
+    if (bytes >= 1024 * 1024 * 1024)
+      return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+    if (bytes >= 1024 * 1024)
+      return `${Math.round(bytes / (1024 * 1024))} MB`;
+    if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+    return `${bytes} B`;
+  }
 </script>
 
-<div class="grid h-screen grid-rows-[auto_1fr]">
+<svelte:window
+  onpointermove={onMove}
+  onpointerup={endResize}
+  onpointercancel={endResize}
+/>
+
+<div class="grid h-screen grid-rows-[auto_1fr]" class:select-none={dragging}>
   <header
     class="flex items-center justify-between border-b px-4 py-3"
   >
-    <h1 class="text-base font-semibold tracking-tight">Switchboard</h1>
+    <div class="flex flex-col">
+      <h1 class="text-base font-semibold leading-tight tracking-tight">Switchboard</h1>
+      <span class="text-[11px] leading-tight text-muted-foreground">By Tawsif</span>
+    </div>
+    <div class="flex items-center gap-3 text-xs text-muted-foreground tabular-nums">
+      <span>
+        <span class="opacity-60">RAM:</span> {formatRss(totals.rss)}
+      </span>
+      <span>
+        <span class="opacity-60">CPU:</span> {Math.round(totals.cpu)}%
+      </span>
+    </div>
     <div class="flex items-center gap-2">
       <Button
         variant="outline"
@@ -87,8 +162,11 @@
     </div>
   </header>
 
-  <div class="grid grid-cols-[minmax(320px,1fr)_2fr] overflow-hidden">
-    <aside class="border-r overflow-y-auto">
+  <div class="flex min-h-0 overflow-hidden">
+    <aside
+      class="overflow-y-auto"
+      style="width: {leftWidth}px; flex: 0 0 auto;"
+    >
       <div class="flex flex-col gap-2 p-3">
         {#if !apps.loaded}
           <p class="px-2 py-8 text-center text-sm text-muted-foreground">
@@ -120,7 +198,16 @@
       </div>
     </aside>
 
-    <main class="min-h-0 overflow-hidden">
+    <div
+      class="w-1 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-accent"
+      onpointerdown={startResize}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize panes"
+      tabindex="-1"
+    ></div>
+
+    <main class="min-h-0 flex-1 overflow-hidden">
       {#if apps.focusedId == null}
         <div class="flex h-full items-center justify-center p-6">
           <p class="text-sm text-muted-foreground">
