@@ -196,15 +196,6 @@ pub async fn start_all(
     let mut skipped: Vec<(String, String)> = Vec::new();
     let mut ready_set: HashSet<String> = HashSet::new();
 
-    // Seed ready_set with apps already running AND already ready so a partial
-    // re-run (some services up, some not) doesn't redundantly skip children.
-    for a in &apps {
-        let s = pm.status(&a.id).await;
-        if s.running && s.ready {
-            ready_set.insert(a.id.clone());
-        }
-    }
-
     // Subscribe BEFORE issuing any start so we don't miss a fast probe.
     let mut rx = pm.subscribe_ready();
 

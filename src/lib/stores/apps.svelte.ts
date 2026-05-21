@@ -105,6 +105,10 @@ class AppsStore {
     skipped: [string, string][];
   } | null>(null);
 
+  dismissLastStartAll(): void {
+    this.lastStartAll = null;
+  }
+
   /** Live order update from dnd `consider` events — no backend call. */
   setOrder(items: AppEntry[]): void {
     this.apps = items;
@@ -147,6 +151,8 @@ class AppsStore {
   }
 
   async startAll(): Promise<void> {
+    // Clear any stale banner from a prior run before this attempt produces a new one.
+    this.lastStartAll = null;
     // Mark every not-yet-running app as starting so the UI reflects intent
     // immediately; the backend skips ones already running.
     for (const a of this.apps) {

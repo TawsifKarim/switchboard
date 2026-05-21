@@ -17,7 +17,7 @@ impl std::fmt::Display for GraphError {
                 write!(f, "app {app} depends on unknown id {dep}")
             }
             GraphError::Cycle(ids) => {
-                write!(f, "dependency cycle: {}", ids.join(" → "))
+                write!(f, "dependency cycle involves: {}", ids.join(", "))
             }
         }
     }
@@ -51,7 +51,7 @@ pub fn topo_levels(apps: &[AppEntry]) -> Result<Vec<Vec<String>>, GraphError> {
         apps.iter().map(|a| (a.id.clone(), 0)).collect();
     let mut children: HashMap<String, Vec<String>> = HashMap::new();
     for a in apps {
-        // Dedupe within an app's own list — `depends_on: [x, x]` is one edge.
+        // Defense against hand-edited apps.json; add_app rejects dupes at the boundary.
         let mut deps: Vec<&String> = a.depends_on.iter().collect();
         deps.sort();
         deps.dedup();
@@ -90,65 +90,16 @@ pub fn topo_levels(apps: &[AppEntry]) -> Result<Vec<Vec<String>>, GraphError> {
     }
 
     if remaining > 0 {
-        let stuck: Vec<String> = indegree
+        let mut stuck: Vec<String> = indegree
             .iter()
             .filter(|(_, &n)| n > 0)
             .map(|(id, _)| id.clone())
             .collect();
-        return Err(GraphError::Cycle(find_cycle(apps, &stuck)));
+        stuck.sort();
+        return Err(GraphError::Cycle(stuck));
     }
 
     Ok(levels)
-}
-
-/// Walk parent edges from any stuck node until we revisit one — that revisit
-/// is the cycle. The returned vec lists ids in traversal order with the
-/// repeating id appended (so `a → b → c → a` reads naturally).
-fn find_cycle(apps: &[AppEntry], stuck: &[String]) -> Vec<String> {
-    let parents: HashMap<&str, &[String]> = apps
-        .iter()
-        .map(|a| (a.id.as_str(), a.depends_on.as_slice()))
-        .collect();
-    let stuck_set: HashSet<&str> = stuck.iter().map(String::as_str).collect();
-
-    fn dfs(
-        node: &str,
-        parents: &HashMap<&str, &[String]>,
-        stuck: &HashSet<&str>,
-        path: &mut Vec<String>,
-        on_path: &mut HashSet<String>,
-    ) -> Option<Vec<String>> {
-        if on_path.contains(node) {
-            let start = path.iter().position(|x| x == node).unwrap();
-            let mut cyc: Vec<String> = path[start..].to_vec();
-            cyc.push(node.to_string());
-            return Some(cyc);
-        }
-        if !stuck.contains(node) {
-            return None;
-        }
-        on_path.insert(node.to_string());
-        path.push(node.to_string());
-        for dep in parents.get(node).copied().unwrap_or(&[]) {
-            if let Some(c) = dfs(dep, parents, stuck, path, on_path) {
-                return Some(c);
-            }
-        }
-        path.pop();
-        on_path.remove(node);
-        None
-    }
-
-    let mut sorted_stuck: Vec<&String> = stuck.iter().collect();
-    sorted_stuck.sort();
-    for s in sorted_stuck {
-        let mut path = Vec::new();
-        let mut on_path = HashSet::new();
-        if let Some(c) = dfs(s, &parents, &stuck_set, &mut path, &mut on_path) {
-            return c;
-        }
-    }
-    stuck.to_vec()
 }
 
 #[cfg(test)]
@@ -236,8 +187,7 @@ mod tests {
         let err = topo_levels(&apps).unwrap_err();
         match err {
             GraphError::Cycle(c) => {
-                assert!(c.len() >= 3, "expected cycle path, got {c:?}");
-                assert_eq!(c.first(), c.last(), "cycle should close on itself");
+                assert_eq!(c, vec!["a".to_string(), "b".to_string()]);
             }
             other => panic!("expected Cycle, got {other:?}"),
         }
@@ -292,10 +242,10 @@ mod tests {
     }
 
     #[test]
-    fn cycle_message_uses_arrows() {
+    fn cycle_message_lists_ids() {
         let err = topo_levels(&[entry("a", &["b"]), entry("b", &["a"])]).unwrap_err();
         let s = err.to_string();
-        assert!(s.contains("→"), "expected arrows in: {s}");
-        assert!(s.contains("cycle"), "expected 'cycle' in: {s}");
+        assert!(s.contains("involves:"), "expected 'involves:' in: {s}");
+        assert!(s.contains("a") && s.contains("b"), "expected cycle ids in: {s}");
     }
 }

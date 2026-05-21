@@ -125,7 +125,7 @@
   });
 
   function dismissStartAllNotice() {
-    apps.lastStartAll = null;
+    apps.dismissLastStartAll();
   }
 
   function formatRss(bytes: number): string {
