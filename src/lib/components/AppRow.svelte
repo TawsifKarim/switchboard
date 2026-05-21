@@ -103,9 +103,13 @@
 </script>
 
 <div
-  class="flex items-center gap-3 rounded-md border px-3 py-2 {isFocused
+  class="flex items-center gap-3 rounded-md border border-l-[3px] px-3 py-2 {isFocused
     ? 'bg-accent'
     : 'bg-card'}"
+  style={crashed
+    ? "border-left-color: var(--destructive)"
+    : `border-left-color: ${entry.tag}; opacity: ${dotDim ? 0.85 : 1}`}
+  aria-label={isRunning ? (rt.ready ? "ready" : "starting") : "stopped"}
 >
   <span
     role="button"
@@ -117,13 +121,6 @@
   >
     <GripVertical class="size-4" />
   </span>
-  <span
-    class="size-2.5 shrink-0 rounded-full {crashed ? 'bg-destructive' : ''}"
-    style={crashed
-      ? ""
-      : `background-color: ${entry.tag}; opacity: ${dotDim ? 0.4 : 1}`}
-    aria-label={isRunning ? (rt.ready ? "ready" : "starting") : "stopped"}
-  ></span>
   <div class="min-w-0 flex-1">
     <div class="truncate text-sm font-medium">{entry.name}</div>
     {#if branch}

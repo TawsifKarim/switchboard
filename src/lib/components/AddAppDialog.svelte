@@ -43,6 +43,8 @@
     return Number.isInteger(n) && n >= 1 && n <= 65535;
   });
 
+  // UX-only gating (disables Submit). Authoritative validation lives in
+  // `add_app` on the Rust side, which also defends against hand-edited apps.json.
   const readyIsValid = $derived.by(() => {
     if (readyKind === "none") return true;
     if (readyKind === "tcp") {

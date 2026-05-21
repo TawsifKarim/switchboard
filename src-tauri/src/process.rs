@@ -30,22 +30,13 @@ use nix::unistd::Pid;
 /// Called when a child exits. The id is the app id; the i32 is the exit code.
 pub type ExitCallback = Box<dyn Fn(&str, i32) + Send + Sync + 'static>;
 
-/// Called when a readiness probe resolves (true/false) or times out.
-/// `reason` is `Some("timeout")` on the timeout path, otherwise `None`.
-pub type ReadyCallback =
-    Box<dyn Fn(&str, bool, Option<String>) + Send + Sync + 'static>;
-
-/// How long a probe will keep trying before giving up. Shorter in tests so the
-/// timeout path can be exercised without 60s waits.
+// Shorter in tests so the timeout path can be exercised without 60s waits.
 #[cfg(not(test))]
 const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(test)]
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Poll cadence for tcp/http probes (no effect on log_regex which is push).
 const PROBE_POLL_INTERVAL: Duration = Duration::from_secs(1);
-
-/// Per-attempt timeout for a single tcp/http poll.
 const PROBE_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Caps for the per-app scrollback ring buffer.
@@ -308,7 +299,6 @@ impl ProcessManager {
     /// Production entry point: emit a Tauri event on exit and on ready.
     pub async fn start(&self, app: tauri::AppHandle, entry: AppEntry) -> Result<u32> {
         let app_for_exit = app.clone();
-        let app_for_ready = app.clone();
         let id_for_event = entry.id.clone();
         let on_exit: ExitCallback = Box::new(move |id, code| {
             let _ = app_for_exit.emit(
@@ -319,20 +309,8 @@ impl ProcessManager {
                 },
             );
         });
-        let ready_tx = self.ready_broadcast.clone();
-        let on_ready: ReadyCallback = Box::new(move |id, ready, reason| {
-            let payload = ReadyPayload {
-                id: id.to_string(),
-                ready,
-                reason,
-            };
-            let _ = app_for_ready.emit("app-ready", payload.clone());
-            // No receivers is normal (frontend listens via Tauri event); send
-            // is best-effort.
-            let _ = ready_tx.send(payload);
-        });
         let pid = self
-            .start_with_callback(entry, on_exit, Some(on_ready))
+            .start_internal(entry, on_exit, Some(app.clone()))
             .await?;
         // Also emit a global app-started event so listeners (e.g. the tray
         // "Running: N" label) can refresh without polling.
@@ -346,14 +324,23 @@ impl ProcessManager {
         Ok(pid)
     }
 
-    /// Test/internal entry point: callback receives (id, exit_code) on child exit.
-    /// `on_ready` is optional — if None, the probe still runs but its result
-    /// is only reflected in `Inner.ready` / `status()`.
+    /// Test-only entry point: callback receives (id, exit_code) on child exit.
+    /// Readiness resolutions go to `ready_broadcast` only — tests subscribe via
+    /// `subscribe_ready()` BEFORE calling start to avoid races.
+    #[cfg(test)]
     pub async fn start_with_callback(
         &self,
         entry: AppEntry,
         on_exit: ExitCallback,
-        on_ready: Option<ReadyCallback>,
+    ) -> Result<u32> {
+        self.start_internal(entry, on_exit, None).await
+    }
+
+    async fn start_internal(
+        &self,
+        entry: AppEntry,
+        on_exit: ExitCallback,
+        app_for_ready: Option<tauri::AppHandle>,
     ) -> Result<u32> {
         // Inherit env first so PATH/HOME/asdf shims/etc. resolve the same as
         // running the command by hand.
@@ -380,7 +367,7 @@ impl ProcessManager {
             entry.port,
             on_exit,
             entry.ready.clone(),
-            on_ready,
+            app_for_ready,
         )
         .await
     }
@@ -425,6 +412,26 @@ impl ProcessManager {
         Ok(id)
     }
 
+    fn emit_ready(
+        &self,
+        id: &str,
+        ready: bool,
+        reason: Option<String>,
+        app: &Option<tauri::AppHandle>,
+    ) {
+        // Two channels intentionally: WebKit listens via Tauri event;
+        // Rust (start_all) via in-process broadcast.
+        let payload = ReadyPayload {
+            id: id.to_string(),
+            ready,
+            reason,
+        };
+        if let Some(app) = app {
+            let _ = app.emit("app-ready", payload.clone());
+        }
+        let _ = self.ready_broadcast.send(payload);
+    }
+
     /// Close a one-off shell: stop the underlying process and drop its
     /// scrollback. Idempotent — safe to call after the shell has exited.
     pub async fn close_shell(&self, id: &str) -> Result<()> {
@@ -444,7 +451,7 @@ impl ProcessManager {
         port: Option<u16>,
         on_exit: ExitCallback,
         probe: Option<ReadyProbe>,
-        on_ready: Option<ReadyCallback>,
+        app_for_ready: Option<tauri::AppHandle>,
     ) -> Result<u32> {
         // Atomic dup-check + claim. Holding `starting` for the duration of
         // spawn prevents a second concurrent start(id) from passing the
@@ -594,32 +601,41 @@ impl ProcessManager {
         guard.armed = false; // already released above
 
         // Kick off the probe AFTER insert so subscribe-via-Inner works. For
-        // probe-less apps we still fire a synthetic ready callback so the
-        // frontend gets a single consistent signal regardless of config.
-        if let Some(probe) = probe {
-            let inner_for_probe = self.inner.clone();
-            let id_for_probe = id.clone();
-            tauri::async_runtime::spawn(async move {
-                let log_rx = bcast_for_probe.subscribe();
-                let (ready, reason) =
-                    run_probe(probe, log_rx, notify_for_probe).await;
-                {
-                    let mut g = inner_for_probe.lock().unwrap();
-                    // Only record if this run is still the current one. If the
-                    // process exited and a new start happened, the running map
-                    // contains a different pid; we still write ready for the
-                    // id since `ready` is keyed only by id — that's fine
-                    // because the new start already reset to false/true.
-                    if g.running.contains_key(&id_for_probe) {
-                        g.ready.insert(id_for_probe.clone(), ready);
+        // probe-less apps we synthesize a ready=true so the frontend gets a
+        // single consistent signal regardless of config. Shells are skipped
+        // entirely — no consumer cares about their readiness.
+        let is_shell = id.starts_with(SHELL_ID_PREFIX);
+        if !is_shell {
+            if let Some(probe) = probe {
+                let inner_for_probe = self.inner.clone();
+                let id_for_probe = id.clone();
+                let ready_tx = self.ready_broadcast.clone();
+                let app_clone = app_for_ready.clone();
+                tauri::async_runtime::spawn(async move {
+                    let (ready, reason) =
+                        run_probe(probe, bcast_for_probe, notify_for_probe).await;
+                    {
+                        let mut g = inner_for_probe.lock().unwrap();
+                        // Only record if this run is still the current one.
+                        if g.running.contains_key(&id_for_probe) {
+                            g.ready.insert(id_for_probe.clone(), ready);
+                        }
                     }
-                }
-                if let Some(cb) = on_ready {
-                    cb(&id_for_probe, ready, reason);
-                }
-            });
-        } else if let Some(cb) = on_ready {
-            cb(&id, true, None);
+                    // Two channels intentionally: WebKit via Tauri event,
+                    // Rust (start_all) via in-process broadcast.
+                    let payload = ReadyPayload {
+                        id: id_for_probe.clone(),
+                        ready,
+                        reason,
+                    };
+                    if let Some(app) = &app_clone {
+                        let _ = app.emit("app-ready", payload.clone());
+                    }
+                    let _ = ready_tx.send(payload);
+                });
+            } else {
+                self.emit_ready(&id, true, None, &app_for_ready);
+            }
         }
 
         Ok(pid)
@@ -848,7 +864,7 @@ impl ProcessManager {
 /// with reason="exited" so the frontend stops waiting on amber.
 async fn run_probe(
     probe: ReadyProbe,
-    log_rx: broadcast::Receiver<Vec<u8>>,
+    broadcast_tx: broadcast::Sender<Vec<u8>>,
     notify_exit: Arc<Notify>,
 ) -> (bool, Option<String>) {
     let deadline = Instant::now() + PROBE_TIMEOUT;
@@ -859,7 +875,10 @@ async fn run_probe(
                 probe_http_loop(url, expect_status, deadline).await
             }
             ReadyProbe::LogRegex { pattern } => {
-                probe_log_regex_loop(pattern, log_rx, deadline).await
+                // Subscribe lazily — tcp/http never need a receiver, and the
+                // subscription is the only thing that consumes a broadcast slot.
+                let rx = broadcast_tx.subscribe();
+                probe_log_regex_loop(pattern, rx, deadline).await
             }
         }
     };
@@ -902,19 +921,16 @@ async fn probe_http_loop(
         if Instant::now() >= deadline {
             return (false, Some("timeout".into()));
         }
-        match client.get(&url).send().await {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                let ok = match expect_status {
-                    Some(want) => status == want,
-                    // Default: any 2xx/3xx counts as ready.
-                    None => (200..400).contains(&status),
-                };
-                if ok {
-                    return (true, None);
-                }
+        if let Ok(resp) = client.get(&url).send().await {
+            let status = resp.status().as_u16();
+            let ok = match expect_status {
+                Some(want) => status == want,
+                // Default: any 2xx/3xx counts as ready.
+                None => (200..400).contains(&status),
+            };
+            if ok {
+                return (true, None);
             }
-            Err(_) => {}
         }
         tokio::time::sleep(PROBE_POLL_INTERVAL).await;
     }
@@ -1147,17 +1163,6 @@ mod tests {
         e
     }
 
-    fn ready_recorder() -> (
-        Option<ReadyCallback>,
-        UnboundedReceiver<(String, bool, Option<String>)>,
-    ) {
-        let (tx, rx) = unbounded_channel::<(String, bool, Option<String>)>();
-        let cb: ReadyCallback = Box::new(move |id, ready, reason| {
-            let _ = tx.send((id.to_string(), ready, reason));
-        });
-        (Some(cb), rx)
-    }
-
     fn test_entry_with_port(id: &str, command: &str, port: u16) -> AppEntry {
         let mut e = test_entry(id, command);
         e.port = Some(port);
@@ -1236,7 +1241,7 @@ mod tests {
         let pm = ProcessManager::new(dir.path().to_path_buf());
         let (cb, _rx) = exit_recorder();
         let pid = pm
-            .start_with_callback(test_entry("t1", "sleep 30"), cb, None)
+            .start_with_callback(test_entry("t1", "sleep 30"), cb)
             .await
             .unwrap();
         // Brief wait for the spawn to settle.
@@ -1252,7 +1257,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let pm = ProcessManager::new(dir.path().to_path_buf());
         let (cb, _) = exit_recorder();
-        pm.start_with_callback(test_entry("t2", "sleep 30"), cb, None)
+        pm.start_with_callback(test_entry("t2", "sleep 30"), cb)
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -1275,7 +1280,6 @@ mod tests {
         pm.start_with_callback(
             test_entry("t3", "exec perl -e '$SIG{TERM} = \"IGNORE\"; sleep 30'"),
             cb,
-            None,
         )
         .await
         .unwrap();
@@ -1299,7 +1303,7 @@ mod tests {
         let pm = ProcessManager::new(dir.path().to_path_buf());
         let (cb, _) = exit_recorder();
         let pid = pm
-            .start_with_callback(test_entry("t4", "sleep 60 & wait"), cb, None)
+            .start_with_callback(test_entry("t4", "sleep 60 & wait"), cb)
             .await
             .unwrap();
         // Wait long enough for outer interactive zsh to source .zshrc and
@@ -1324,7 +1328,7 @@ mod tests {
         let pm = ProcessManager::new(dir.path().to_path_buf());
 
         let (cb_ok, mut rx_ok) = exit_recorder();
-        pm.start_with_callback(test_entry("ok", "true"), cb_ok, None)
+        pm.start_with_callback(test_entry("ok", "true"), cb_ok)
             .await
             .unwrap();
         let (id, code) = tokio::time::timeout(Duration::from_secs(5), rx_ok.recv())
@@ -1335,7 +1339,7 @@ mod tests {
         assert_eq!(code, 0);
 
         let (cb_bad, mut rx_bad) = exit_recorder();
-        pm.start_with_callback(test_entry("bad", "false"), cb_bad, None)
+        pm.start_with_callback(test_entry("bad", "false"), cb_bad)
             .await
             .unwrap();
         let (id2, code2) = tokio::time::timeout(Duration::from_secs(5), rx_bad.recv())
@@ -1357,7 +1361,6 @@ mod tests {
                 "while :; do echo tick; sleep 0.1; done",
             ),
             cb,
-            None,
         )
         .await
         .unwrap();
@@ -1387,12 +1390,12 @@ mod tests {
         let dir = tempdir().unwrap();
         let pm = ProcessManager::new(dir.path().to_path_buf());
         let (cb1, _) = exit_recorder();
-        pm.start_with_callback(test_entry("dup", "sleep 5"), cb1, None)
+        pm.start_with_callback(test_entry("dup", "sleep 5"), cb1)
             .await
             .unwrap();
         let (cb2, _) = exit_recorder();
         let err = pm
-            .start_with_callback(test_entry("dup", "sleep 5"), cb2, None)
+            .start_with_callback(test_entry("dup", "sleep 5"), cb2)
             .await
             .err()
             .expect("second start should error");
@@ -1416,11 +1419,11 @@ mod tests {
         let (cb1, _) = exit_recorder();
         let (cb2, _) = exit_recorder();
         let h1 = tokio::spawn(async move {
-            pm1.start_with_callback(test_entry("race", "sleep 5"), cb1, None)
+            pm1.start_with_callback(test_entry("race", "sleep 5"), cb1)
                 .await
         });
         let h2 = tokio::spawn(async move {
-            pm2.start_with_callback(test_entry("race", "sleep 5"), cb2, None)
+            pm2.start_with_callback(test_entry("race", "sleep 5"), cb2)
                 .await
         });
         let (r1, r2) = tokio::join!(h1, h2);
@@ -1461,7 +1464,7 @@ mod tests {
             .abort_handle();
             inner.attachments.insert("decay".to_string(), h);
         }
-        pm.start_with_callback(test_entry("decay", "true"), cb, None)
+        pm.start_with_callback(test_entry("decay", "true"), cb)
             .await
             .unwrap();
         let _ = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
@@ -1509,7 +1512,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let pm = ProcessManager::new(dir.path().to_path_buf());
         let (cb, mut rx) = exit_recorder();
-        pm.start_with_callback(test_entry_with_port("pre", "true", port), cb, None)
+        pm.start_with_callback(test_entry_with_port("pre", "true", port), cb)
             .await
             .unwrap();
         // Wait for our command to exit.
@@ -1576,7 +1579,7 @@ mod tests {
         let pm = ProcessManager::new(dir.path().to_path_buf());
 
         let (cb1, mut rx1) = exit_recorder();
-        pm.start_with_callback(test_entry("reset", "echo first-run"), cb1, None)
+        pm.start_with_callback(test_entry("reset", "echo first-run"), cb1)
             .await
             .unwrap();
         // Wait for the first run to fully exit so the reader drains EOF.
@@ -1591,7 +1594,7 @@ mod tests {
 
         // Second start: ring should be reset before any second-run bytes land.
         let (cb2, mut rx2) = exit_recorder();
-        pm.start_with_callback(test_entry("reset", "echo second-run"), cb2, None)
+        pm.start_with_callback(test_entry("reset", "echo second-run"), cb2)
             .await
             .unwrap();
         let _ = tokio::time::timeout(Duration::from_secs(5), rx2.recv()).await;
@@ -1615,7 +1618,6 @@ mod tests {
         pm.start_with_callback(
             test_entry("survive", "echo last-words; exit 0"),
             cb,
-            None,
         )
         .await
         .unwrap();
@@ -1634,7 +1636,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let pm = ProcessManager::new(dir.path().to_path_buf());
         let (cb, mut rx) = exit_recorder();
-        pm.start_with_callback(test_entry("zap", "echo hi"), cb, None)
+        pm.start_with_callback(test_entry("zap", "echo hi"), cb)
             .await
             .unwrap();
         let _ = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
@@ -1703,18 +1705,18 @@ mod tests {
         let dir = tempdir().unwrap();
         let pm = ProcessManager::new(dir.path().to_path_buf());
         let (cb, _) = exit_recorder();
-        let (rcb, mut rrx) = ready_recorder();
-        pm.start_with_callback(test_entry("noprobe", "sleep 5"), cb, rcb)
+        // Subscribe BEFORE start: probe-less apps fire synchronously inside spawn_pty.
+        let mut rrx = pm.subscribe_ready();
+        pm.start_with_callback(test_entry("noprobe", "sleep 5"), cb)
             .await
             .unwrap();
-        let (id, ready, reason) =
-            tokio::time::timeout(Duration::from_secs(2), rrx.recv())
-                .await
-                .expect("ready cb should fire fast")
-                .expect("recv");
-        assert_eq!(id, "noprobe");
-        assert!(ready);
-        assert_eq!(reason, None);
+        let payload = tokio::time::timeout(Duration::from_secs(2), rrx.recv())
+            .await
+            .expect("ready event should fire fast")
+            .expect("recv");
+        assert_eq!(payload.id, "noprobe");
+        assert!(payload.ready);
+        assert_eq!(payload.reason, None);
         pm.stop("noprobe").await.unwrap();
     }
 
@@ -1726,21 +1728,19 @@ mod tests {
         let dir = tempdir().unwrap();
         let pm = ProcessManager::new(dir.path().to_path_buf());
         let (cb, _) = exit_recorder();
-        let (rcb, mut rrx) = ready_recorder();
+        let mut rrx = pm.subscribe_ready();
         pm.start_with_callback(
             test_entry_with_probe("tcpok", "sleep 5", ReadyProbe::Tcp { port }),
             cb,
-            rcb,
         )
         .await
         .unwrap();
-        let (id, ready, _) =
-            tokio::time::timeout(Duration::from_secs(4), rrx.recv())
-                .await
-                .expect("ready cb timeout")
-                .expect("recv");
-        assert_eq!(id, "tcpok");
-        assert!(ready, "expected ready=true with listener bound");
+        let payload = tokio::time::timeout(Duration::from_secs(4), rrx.recv())
+            .await
+            .expect("ready event timeout")
+            .expect("recv");
+        assert_eq!(payload.id, "tcpok");
+        assert!(payload.ready, "expected ready=true with listener bound");
         pm.stop("tcpok").await.unwrap();
         let _ = nc.wait();
     }
@@ -1752,7 +1752,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let pm = ProcessManager::new(dir.path().to_path_buf());
         let (cb, _) = exit_recorder();
-        let (rcb, mut rrx) = ready_recorder();
+        let mut rrx = pm.subscribe_ready();
         pm.start_with_callback(
             test_entry_with_probe(
                 "tcpto",
@@ -1760,18 +1760,16 @@ mod tests {
                 ReadyProbe::Tcp { port: 18892 },
             ),
             cb,
-            rcb,
         )
         .await
         .unwrap();
-        let (id, ready, reason) =
-            tokio::time::timeout(Duration::from_secs(8), rrx.recv())
-                .await
-                .expect("ready cb timeout")
-                .expect("recv");
-        assert_eq!(id, "tcpto");
-        assert!(!ready, "expected ready=false on timeout");
-        assert_eq!(reason.as_deref(), Some("timeout"));
+        let payload = tokio::time::timeout(Duration::from_secs(8), rrx.recv())
+            .await
+            .expect("ready event timeout")
+            .expect("recv");
+        assert_eq!(payload.id, "tcpto");
+        assert!(!payload.ready, "expected ready=false on timeout");
+        assert_eq!(payload.reason.as_deref(), Some("timeout"));
         // Process still alive even though probe failed.
         assert!(pm.status("tcpto").await.running);
         pm.stop("tcpto").await.unwrap();
@@ -1782,7 +1780,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let pm = ProcessManager::new(dir.path().to_path_buf());
         let (cb, _) = exit_recorder();
-        let (rcb, mut rrx) = ready_recorder();
+        let mut rrx = pm.subscribe_ready();
         pm.start_with_callback(
             test_entry_with_probe(
                 "logmatch",
@@ -1790,17 +1788,15 @@ mod tests {
                 ReadyProbe::LogRegex { pattern: "listening on".into() },
             ),
             cb,
-            rcb,
         )
         .await
         .unwrap();
-        let (id, ready, _) =
-            tokio::time::timeout(Duration::from_secs(4), rrx.recv())
-                .await
-                .expect("ready cb timeout")
-                .expect("recv");
-        assert_eq!(id, "logmatch");
-        assert!(ready);
+        let payload = tokio::time::timeout(Duration::from_secs(4), rrx.recv())
+            .await
+            .expect("ready event timeout")
+            .expect("recv");
+        assert_eq!(payload.id, "logmatch");
+        assert!(payload.ready);
         pm.stop("logmatch").await.unwrap();
     }
 
@@ -1809,8 +1805,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let pm = ProcessManager::new(dir.path().to_path_buf());
         let (cb, _) = exit_recorder();
-        let (rcb, mut rrx) = ready_recorder();
-        pm.start_with_callback(test_entry("statusprobe", "sleep 5"), cb, rcb)
+        let mut rrx = pm.subscribe_ready();
+        pm.start_with_callback(test_entry("statusprobe", "sleep 5"), cb)
             .await
             .unwrap();
         let _ = tokio::time::timeout(Duration::from_secs(2), rrx.recv()).await;
@@ -1825,7 +1821,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let pm = ProcessManager::new(dir.path().to_path_buf());
         let (cb, mut rx) = exit_recorder();
-        pm.start_with_callback(test_entry("logme", "echo hello-from-test"), cb, None)
+        pm.start_with_callback(test_entry("logme", "echo hello-from-test"), cb)
             .await
             .unwrap();
         let _ = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
