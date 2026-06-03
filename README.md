@@ -2,6 +2,35 @@
 
 Local dev launcher for your microservices.
 
+## Getting started
+
+There are two ways to run Switchboard, depending on what you want:
+
+### Run in dev mode (live reload)
+
+Best while you're working on the code — the app hot-reloads as you edit:
+
+```sh
+pnpm install
+pnpm tauri dev
+```
+
+### Build and run the app — `./install.sh`
+
+Best when you want a real, double-clickable macOS app. From a fresh clone, the
+installer checks/installs the prerequisites (Xcode Command Line Tools, Rust,
+Node, pnpm), installs dependencies, builds the native `.app`, and opens it:
+
+```sh
+./install.sh
+```
+
+Because the app is compiled on your own Mac, it isn't quarantined by Gatekeeper
+and launches with a normal double-click — no Apple Developer signing needed.
+
+After pulling new changes, re-run `./install.sh` to rebuild the app with the
+latest code (it re-syncs dependencies too).
+
 ## What it does
 
 - Register an app with a name, working directory, and a command (e.g. `air`).
@@ -16,19 +45,11 @@ Local dev launcher for your microservices.
 - pnpm
 - Rust 1.75+ (install via [rustup](https://rustup.rs))
 
-## Setup
+`./install.sh` installs any of these that are missing, so you only need them if you build manually.
 
-```sh
-pnpm install
-```
+## Build the .app manually
 
-## Run in dev
-
-```sh
-pnpm tauri dev
-```
-
-## Build .app
+`./install.sh` does this for you, but you can also build directly:
 
 ```sh
 pnpm tauri build
