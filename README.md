@@ -1,19 +1,10 @@
 # Switchboard
 
-Local dev launcher for your microservices.
+Switchboard is a control panel for your local microservices. When you're working on one service but need its dependencies running too, Switchboard keeps every process alive and gives you a single dashboard — start, stop, and watch the live terminal output of each service from one place, instead of juggling a dozen terminal tabs.
 
 ## Getting started
 
 There are two ways to run Switchboard, depending on what you want:
-
-### Run in dev mode (live reload)
-
-Best while you're working on the code — the app hot-reloads as you edit:
-
-```sh
-pnpm install
-pnpm tauri dev
-```
 
 ### Build and run the app — `./install.sh`
 
@@ -30,6 +21,15 @@ and launches with a normal double-click — no Apple Developer signing needed.
 
 After pulling new changes, re-run `./install.sh` to rebuild the app with the
 latest code (it re-syncs dependencies too).
+
+### Run in dev mode (live reload)
+
+Best while you're working on the code — the app hot-reloads as you edit:
+
+```sh
+pnpm install
+pnpm tauri dev
+```
 
 ## What it does
 
