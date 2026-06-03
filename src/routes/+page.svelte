@@ -8,6 +8,7 @@
   import Square from "@lucide/svelte/icons/square";
   import { apps } from "$lib/stores/apps.svelte";
   import { dndzone, type DndEvent } from "svelte-dnd-action";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import type { AppEntry } from "$lib/ipc";
 
   // svelte-dnd-action doesn't ship a `dragHandleSelector` option. To restrict
@@ -150,7 +151,14 @@
   >
     <div class="flex flex-col">
       <h1 class="text-base font-semibold leading-tight tracking-tight">Switchboard</h1>
-      <span class="text-[11px] leading-tight text-muted-foreground">By Tawsif</span>
+      <a
+        href="https://github.com/TawsifKarim"
+        onclick={(e) => {
+          e.preventDefault();
+          openUrl("https://github.com/TawsifKarim");
+        }}
+        class="text-[11px] leading-tight text-muted-foreground hover:text-foreground hover:underline"
+      >By Tawsif</a>
     </div>
     <div class="flex items-center gap-3 text-xs text-muted-foreground tabular-nums">
       <span>
