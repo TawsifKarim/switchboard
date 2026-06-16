@@ -45,6 +45,12 @@ const PROBE_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(250);
 const RING_CAP_LINES: usize = 300;
 const RING_CAP_BYTES: usize = 512 * 1024;
 
+/// Hard size cap for a per-app on-disk PTY log. When the live `<id>.log`
+/// passes this, it rotates to `<id>.log.1` (one generation kept) so a chatty
+/// or long-running service can't grow its log without bound. Worst-case
+/// on-disk per app is ~2× this.
+const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
+
 /// Per-app rolling buffer of recent PTY bytes. Trims from the front when
 /// either the line or byte budget is exceeded.
 struct RingBuffer {
@@ -96,6 +102,57 @@ impl RingBuffer {
 
 fn bytecount_newlines(b: &[u8]) -> usize {
     b.iter().filter(|&&c| c == b'\n').count()
+}
+
+/// Append-only PTY log with a hard size cap. The reader loop writes every byte
+/// a child emits here; without a cap a chatty service (e.g. one retrying a
+/// failed connection once a second forever) grows it without bound. When the
+/// live file would pass `MAX_LOG_BYTES` it rotates to `<id>.log.1`, keeping one
+/// generation so recent scrollback survives the boundary.
+struct RotatingLog {
+    path: PathBuf,
+    file: File,
+    written: u64,
+}
+
+impl RotatingLog {
+    /// Open (creating if needed) in append mode. Seeds `written` from the
+    /// current on-disk size so an already-oversized file rotates on first write
+    /// instead of growing further.
+    fn open(path: PathBuf) -> std::io::Result<Self> {
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let written = file.metadata().map(|m| m.len()).unwrap_or(0);
+        Ok(Self {
+            path,
+            file,
+            written,
+        })
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        if self.written + bytes.len() as u64 > MAX_LOG_BYTES {
+            self.rotate()?;
+        }
+        self.file.write_all(bytes)?;
+        self.file.flush()?;
+        self.written += bytes.len() as u64;
+        Ok(())
+    }
+
+    /// Rename the live file to `<id>.log.1` (replacing any prior generation) and
+    /// reopen a fresh empty live file.
+    fn rotate(&mut self) -> std::io::Result<()> {
+        if let Some(name) = self.path.file_name().and_then(|n| n.to_str()) {
+            let rotated = self.path.with_file_name(format!("{name}.1"));
+            std::fs::rename(&self.path, &rotated)?;
+        }
+        self.file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        self.written = 0;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -437,6 +494,7 @@ impl ProcessManager {
     pub async fn close_shell(&self, id: &str) -> Result<()> {
         self.stop(id).await?;
         self.clear_ring(id);
+        self.delete_logs(id);
         Ok(())
     }
 
@@ -496,10 +554,7 @@ impl ProcessManager {
         std::fs::create_dir_all(&self.log_dir)
             .with_context(|| format!("creating log dir {}", self.log_dir.display()))?;
         let log_path = self.log_dir.join(format!("{id}.log"));
-        let log_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
+        let log_file = RotatingLog::open(log_path.clone())
             .with_context(|| format!("opening log file {}", log_path.display()))?;
 
         let pty = native_pty_system();
@@ -791,6 +846,15 @@ impl ProcessManager {
         let mut inner = self.inner.lock().unwrap();
         inner.recent_output.remove(id);
         inner.ready.remove(id);
+    }
+
+    /// Remove an app's on-disk PTY logs (live `<id>.log` + rotated `<id>.log.1`).
+    /// Called when the app entry is deleted or a one-off shell is closed so logs
+    /// don't outlive their owner. Best-effort: a missing file is not an error.
+    pub fn delete_logs(&self, id: &str) {
+        let live = self.log_dir.join(format!("{id}.log"));
+        let _ = std::fs::remove_file(&live);
+        let _ = std::fs::remove_file(live.with_file_name(format!("{id}.log.1")));
     }
 
     /// Test/diagnostic helper: return the current ring snapshot for an id,
@@ -1109,7 +1173,7 @@ async fn forward_loop(
 
 fn reader_loop(
     mut reader: Box<dyn Read + Send>,
-    mut log: File,
+    mut log: RotatingLog,
     tx: broadcast::Sender<Vec<u8>>,
     inner: Arc<Mutex<Inner>>,
     id: String,
@@ -1119,8 +1183,7 @@ fn reader_loop(
         match reader.read(&mut buf) {
             Ok(0) => break, // EOF: child closed the PTY
             Ok(n) => {
-                let _ = log.write_all(&buf[..n]);
-                let _ = log.flush();
+                let _ = log.write(&buf[..n]);
                 // Push into the per-app scrollback ring. Critical section is
                 // tiny: just a HashMap lookup + VecDeque ops. No .await held.
                 {
@@ -1831,5 +1894,40 @@ mod tests {
             log.contains("hello-from-test"),
             "log content: {log:?}"
         );
+    }
+
+    #[test]
+    fn rotating_log_caps_live_file_and_keeps_one_generation() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cap.log");
+        let mut log = RotatingLog::open(path.clone()).unwrap();
+
+        // Write comfortably past the cap so at least one rotation must occur.
+        let chunk = vec![b'x'; 64 * 1024];
+        let mut written = 0u64;
+        while written <= MAX_LOG_BYTES + 128 * 1024 {
+            log.write(&chunk).unwrap();
+            written += chunk.len() as u64;
+        }
+
+        let live = std::fs::metadata(&path).unwrap().len();
+        assert!(live <= MAX_LOG_BYTES, "live log {live} exceeds cap");
+        assert!(
+            dir.path().join("cap.log.1").exists(),
+            "expected one rotated generation"
+        );
+    }
+
+    #[test]
+    fn delete_logs_removes_live_and_rotated() {
+        let dir = tempdir().unwrap();
+        let pm = ProcessManager::new(dir.path().to_path_buf());
+        std::fs::write(dir.path().join("gone.log"), b"live").unwrap();
+        std::fs::write(dir.path().join("gone.log.1"), b"rotated").unwrap();
+
+        pm.delete_logs("gone");
+
+        assert!(!dir.path().join("gone.log").exists());
+        assert!(!dir.path().join("gone.log.1").exists());
     }
 }

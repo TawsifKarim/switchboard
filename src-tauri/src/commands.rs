@@ -141,6 +141,7 @@ pub async fn delete_app(
     pm.stop(&id).await.map_err(|e| e.to_string())?;
     config::delete(&path, &id).map_err(|e| e.to_string())?;
     pm.clear_ring(&id);
+    pm.delete_logs(&id);
     Ok(())
 }
 
